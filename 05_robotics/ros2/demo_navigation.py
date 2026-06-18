@@ -146,19 +146,26 @@ def demo_run_navigation(control_mode="split", use_viz=False):
     slam = RTABMapNode(world, robot, keyframe_min_dist=0.3, hz=10.0)
     costmap = CostmapNode(robot_radius=0.3, inflation_radius=0.5)
     decision = DecisionNode(world)
+    # NOTE: BT 恢复动作(BACKUP/SPIN)需要控制小车, 保留 robot 引用
+    #       真 ROS2 里这会是一个 /cmd_vel Service, 不直接传引用
     decision.context["robot"] = robot
     planner = AStarPlannerNode(world)
+    # NOTE: planner 和 controller 通过订阅 /costmap 和 /plan 获取数据,
+    #       不再需要 planner.latest_costmap = ... 这种后门赋值
     controller = ControlNode(world, robot, hz=50.0, mode=control_mode)
 
-    # BT 重规划回调: BT 说 "重算" → 置空 plan
-    def _bt_trigger_replan():
-        nonlocal plan
-        plan = None
-    decision.context["trigger_replan"] = _bt_trigger_replan
-
-    # ── 设置目标 ──
+    # ── 设置目标 (通过 Action: /navigate_to_goal) ──
     goal_x, goal_y = world.landmarks["workstation"]
     decision.set_goal(goal_x, goal_y)
+
+    # ── 演示: Service + Action + Parameter ──
+    # Service: 调用 SLAM 的 /get_map
+    map_client = planner.create_client("/get_map")
+    _ = map_client.call(None)  # 演示 Service 调用
+    # Action: 通过 /navigate_to_goal 发送目标
+    nav_client = decision.create_action_client("/navigate_to_goal")
+    # Parameter: 控制节点声明了 kp/ki/kd/max_v, 运行中可改
+    controller.set_parameter("kp", 1.5)  # 演示运行时改参数
 
     # ── 可视化 (可选) ──
     viz = None
@@ -167,24 +174,24 @@ def demo_run_navigation(control_mode="split", use_viz=False):
         viz.goal = (goal_x, goal_y)
         log_ok("可视化窗口已打开")
 
-    # ── 初始地图 + costmap ──
+    # ── 初始地图 + costmap — Topic 链: /odom → /map → /costmap ──
+    # NOTE: 发布必须在所有 Node 订阅后做, 否则 mock 不回溯历史消息
     from ros2_nav_course.utils.mock_ros2 import Odometry as OdomMsg
     for _ in range(5):
         x, y, t = robot.get_pose()
         slam._odom_callback(OdomMsg(pose=Pose(x, y, t)))
-    slam._tick()
-    costmap._inflate_and_publish()
-    planner.latest_costmap = costmap.costmap
-    controller.costmap = costmap.costmap
+    slam._tick()   # 发布 /map → costmap._map_callback 触发
+    costmap._inflate_and_publish()  # 发布 /costmap → planner+controller 收到
+    # NOTE: mock_ros2 不回溯历史消息, 确保 MPC 拿到 costmap
+    if controller.unified_mpc and controller.unified_mpc.cm_data is None:
+        controller.unified_mpc.set_costmap(costmap.costmap)
 
-    # ── 初算路径 ──
+    # ── 初算路径 (planner 已有 costmap, 发布 /plan → controller 收到) ──
     planner.set_pose(robot.x, robot.y)
     planner.set_goal(goal_x, goal_y)
-    plan = planner.plan()
-    if plan:
-        controller.set_path(plan)
-        if not use_viz:
-            log_ok(f"  初始路径: {len(plan)} 个航点 (A*)")
+    plan = planner.plan()  # 发布 /plan → controller._plan_cb 自动设 current_path
+    if plan and not use_viz:
+        log_ok(f"  初始路径: {len(plan)} 个航点 (A*)")
 
     # ── 主控制循环 (50Hz) ──
     max_steps = 2000
@@ -210,8 +217,7 @@ def demo_run_navigation(control_mode="split", use_viz=False):
             # 立刻重建 costmap 让 A* 看到新障碍物
             slam._tick()
             costmap._inflate_and_publish()
-            planner.latest_costmap = costmap.costmap
-            controller.costmap = costmap.costmap
+            # costmap 发布 /costmap → planner+controller 通过订阅自动获取
             if viz:
                 viz.update_costmap(costmap.costmap)
                 viz.refresh_obstacles()
@@ -222,8 +228,7 @@ def demo_run_navigation(control_mode="split", use_viz=False):
         if step % 20 == 0:
             slam._tick()
             costmap._inflate_and_publish()
-            planner.latest_costmap = costmap.costmap
-            controller.costmap = costmap.costmap
+            # costmap 发布 /costmap → planner+controller 通过订阅自动获取
 
         # 重规划: path_blocked 时立即, 否则每 2 秒维护
         if plan is None or step % 100 == 0:
@@ -235,10 +240,9 @@ def demo_run_navigation(control_mode="split", use_viz=False):
                 decision.context["recovery_count"] = 0
 
             planner.set_pose(robot.x, robot.y)
-            new_plan = planner.plan(verbose=was_blocked)
+            new_plan = planner.plan(verbose=was_blocked)  # publishes /plan → controller._plan_cb
             if new_plan:
                 plan = new_plan
-                controller.set_path(plan)
                 decision.context["path_blocked"] = False
                 if was_blocked:
                     log_ok(f"  ↻ 重规划: {len(plan)} 航点 (第{decision.context.get('recovery_count',0)}次恢复)")

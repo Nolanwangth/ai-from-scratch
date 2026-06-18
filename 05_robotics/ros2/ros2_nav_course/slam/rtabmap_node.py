@@ -109,7 +109,16 @@ class RTABMapNode(Node):
         # ── 订阅 /odom ──
         self.create_subscription("/odom", self._odom_callback, "Odometry")
         self.create_timer(1.0 / hz, self._tick)
+
+        # ── Service: /get_map — 别的 Node 随时查询当前地图 ──
+        self._latest_grid = None
+        self.create_service("/get_map", self._get_map_handler)
+
         log_ok(f"[SLAM] RTAB-Map ready (STM={stm_size}, WM={wm_size})")
+
+    def _get_map_handler(self, _request):
+        """Service handler: 返回最新的占据栅格."""
+        return dict(grid=self._latest_grid) if self._latest_grid else dict(error="no map yet")
 
     def _odom_callback(self, odom: Odometry):
         """收到里程计数据 → 处理一帧"""
@@ -181,6 +190,7 @@ class RTABMapNode(Node):
             resolution=0.05, origin_x=ox, origin_y=oy,
             data=list(grid.flatten())
         )
+        self._latest_grid = og  # 缓存, /get_map service 用
         self.publish("/map", og)
 
         px, py, pt = self.corrected_pose

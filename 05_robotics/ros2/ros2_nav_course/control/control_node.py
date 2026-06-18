@@ -68,16 +68,14 @@ class LateralMPC:
     def _rollout(self, robot, path, v, omega):
         x, y, theta = robot.x, robot.y, robot.theta
         total = 0.0
-        # Closest path point for heading reference
-        best_idx = min(range(len(path)),
-                       key=lambda i: math.sqrt((x-path[i][0])**2+(y-path[i][1])**2))
         for step in range(self.predict_steps):
             x += v * math.cos(theta) * self.dt
             y += v * math.sin(theta) * self.dt
             theta += omega * self.dt
             min_dist = min(math.sqrt((x-px)**2 + (y-py)**2) for px, py in path)
-            # Heading error: robot heading vs path direction at this segment
-            look = min(best_idx + 2, len(path) - 1)
+            best_idx = min(range(len(path)),
+                           key=lambda i: math.sqrt((x-path[i][0])**2+(y-path[i][1])**2))
+            look = min(best_idx + 20, len(path) - 1)  # 20点=1m超前, 用整体方向
             p_cur, p_look = path[best_idx], path[look]
             path_dir = math.atan2(p_look[1]-p_cur[1], p_look[0]-p_cur[0])
             heading_err = abs(theta - path_dir)
@@ -240,7 +238,7 @@ class UnifiedMPC:
         self.cm_res = 0.05
         self.cm_ox = 0.0
         self.cm_oy = 0.0
-        n_v_actual = self.n_v
+        n_v_actual = self.n_v + 1  # +(-0.3)
         n_w_actual = self.n_omega * 2 + 1
         total = n_v_actual * n_w_actual
         log_info(f"  [UnifiedMPC] {n_v_actual}v x {n_w_actual}w = {total} candidates, "
@@ -263,9 +261,9 @@ class UnifiedMPC:
         best_v, best_omega = 0.0, 0.0
         best_cost = float('inf')
 
-        # Sample v: 11 values from 0.1 to max_v
-        v_candidates = np.linspace(0.1, self.max_v, self.n_v)
-        # Sample ω: 31 values from -max_omega to +max_omega
+        # v 候选: 正向 7 个 + 倒车 1 个 (-0.3m/s), 不含 0 (避免 MPC 选停)
+        v_candidates = list(np.linspace(0.1, self.max_v, self.n_v)) + [-0.3]
+        # ω 候选: 从 -max_omega 到 +max_omega
         omega_candidates = np.linspace(-self.max_omega, self.max_omega,
                                         self.n_omega * 2 + 1)
 
@@ -284,28 +282,26 @@ class UnifiedMPC:
     def _rollout(self, robot, path, v, omega):
         x, y, theta = robot.x, robot.y, robot.theta
         total = 0.0
-        goal = path[-1]
-        best_idx = min(range(len(path)),
-                       key=lambda i: math.sqrt((x-path[i][0])**2+(y-path[i][1])**2))
         for step in range(self.predict_steps):
             x += v * math.cos(theta) * self.dt
             y += v * math.sin(theta) * self.dt
             theta += omega * self.dt
 
-            # 路径偏差
+            # 路径偏差: 到这个预测位置最近路径点的距离
             min_dist = min(math.sqrt((x-px)**2 + (y-py)**2) for px, py in path)
+            # 每步重新找最近路径点 (不停留原地)
+            best_idx = min(range(len(path)),
+                           key=lambda i: math.sqrt((x-path[i][0])**2+(y-path[i][1])**2))
 
-            # 朝向偏差
-            look = min(best_idx + 2, len(path) - 1)
+            # 朝向偏差: 路径上超前 2 步的方向 vs 预测朝向
+            look = min(best_idx + 20, len(path) - 1)  # 20点=1m超前, 用整体方向
             p_cur, p_look = path[best_idx], path[look]
             path_dir = math.atan2(p_look[1]-p_cur[1], p_look[0]-p_cur[0])
             heading_err = abs(theta - path_dir)
             heading_err = min(heading_err, 2*math.pi - heading_err)
 
             # 目标距离
-            d_goal = math.sqrt((x-goal[0])**2 + (y-goal[1])**2)
-
-            # 碰撞检测: O(1) costmap 网格查表, 不遍历障碍物
+            # 碰撞检测: costmap 网格 O(1) 查表, 若不可用则回退到 world
             cost = 0
             near_obs = False
             if self.cm_data is not None:
@@ -314,25 +310,33 @@ class UnifiedMPC:
                 H, W = self.cm_data.shape
                 if 0 <= gx < W and 0 <= gy < H:
                     cost = self.cm_data[gy, gx]
+            elif self.world is not None:
+                # 回退: 用 world.is_collision 判断
+                if self.world.is_collision(x, y, 0.20):
+                    cost = 254
+                elif self.world.is_collision(x, y, 0.40):
+                    cost = 50
             if cost >= 200:
-                collision = 500.0       # 致命区 (障碍物本体)
+                collision = 500.0       # 致命区, 直接炸
             elif cost >= 50:
-                collision = 50.0        # 膨胀区 (阴影), 代价高
+                collision = cost * 0.5  # 阴影区: 代价和阴影深度成正比 (50→25, 100→50)
                 near_obs = True
             else:
-                collision = 0.0         # 自由空间
+                collision = 0.0
 
-            # 速度惩罚: 阴影区还开快 = 罚
-            overspeed = max(0.0, v - max(0.1, d_goal * 0.5))
-            if near_obs:
-                overspeed = max(overspeed, v - 0.1)
+            # 速度惩罚
+            overspeed = max(0.0, v - 1.0)  # 超速 = v > 1.0m/s
+            if near_obs and cost >= 100:
+                # 深阴影区 (距障碍 ≤0.3m): 强制慢速
+                overspeed = max(overspeed, v - 0.3)
+            # 浅阴影区 (cost<100, 距障碍 >0.3m): 不罚速, 让车正常通过
 
-            w = 1.0 + step * 0.2
-            total += (min_dist*3.0 + heading_err*1.5 + d_goal*0.3 +
-                      collision + overspeed*2.0 + abs(omega)*0.08) * w
+            w = 1.0  # flat weight, 不放大远期误差
+            total += (min_dist*2.0 + collision + overspeed*2.0) * w
 
-        # 加速度平滑
-        total += abs(v - robot.v) * 0.5
+        # 加速度平滑 (弱, 不让 v=0 永远赢)
+        # 前进奖励: v 越大越优, 平滑靠 rollout 终点判断
+        total -= v * 0.5
         return total
 
 
@@ -389,9 +393,40 @@ class ControlNode(Node):
         else:
             raise ValueError(f"Unknown self.mode: {self.mode}")
 
+        # ── 订阅 /costmap (来自 CostmapNode, 换掉直接赋值后门) ──
+        self.create_subscription("/costmap", self._costmap_cb, "OccupancyGrid")
+        # ── 订阅 /plan (来自 A*, 换掉直接 set_path 调用) ──
+        self.create_subscription("/plan", self._plan_cb, "Path")
+
+        # ── 参数 (运行时可变, 不用改代码重新跑) ──
+        self.declare_parameter("kp", 1.5, "PID proportional gain")
+        self.declare_parameter("ki", 0.3, "PID integral gain")
+        self.declare_parameter("kd", 0.1, "PID derivative gain")
+        self.declare_parameter("max_v", self.robot.max_v, "Max linear velocity (m/s)")
+
         self.create_publisher("/cmd_vel", "Twist")
         self.create_timer(self.dt, self._control_loop)
         log_ok(f"[control] Mode={self.mode} @ {hz}Hz")
+
+    def _costmap_cb(self, cm):
+        """订阅 /costmap — CostmapNode 发新地图时自动更新."""
+        self.costmap = cm
+        if self.unified_mpc is not None:
+            self.unified_mpc.set_costmap(cm)
+
+    def _plan_cb(self, plan_msg):
+        """订阅 /plan — A* 发新路径时自动更新当前路径."""
+        path = [(p.x, p.y) for p in plan_msg.poses] if plan_msg and plan_msg.poses else []
+        if path:
+            self.set_path(path)
+
+    def _reload_params(self):
+        """从参数服务器重新读取 PID 参数 (运行中可调)."""
+        if self.pid:
+            self.pid.kp = self.get_parameter("kp") or self.pid.kp
+            self.pid.ki = self.get_parameter("ki") or self.pid.ki
+            self.pid.kd = self.get_parameter("kd") or self.pid.kd
+        self.robot.max_v = self.get_parameter("max_v") or self.robot.max_v
 
     def _init_split_mode(self):
         self.speed_profiler = SpeedProfiler(max_v=self.robot.max_v, min_v=0.1)
@@ -409,10 +444,10 @@ class ControlNode(Node):
 
     def _init_unified_mode(self):
         # 候选数对齐 split: 7v × 10ω = 70 候选 × 8步 = 560次, 接近 split 的 410次
-        n_v = 7
-        n_omega = 5  # 2×5+1=11个ω候选
+        n_v = 7  # 实际 v 候选: 0 + 7个正向 + (-0.3) = 9个
+        n_omega = 15  # 2×15+1=31个ω候选, 细粒度转向
         self.unified_mpc = UnifiedMPC(
-            predict_steps=8, dt=self.dt,
+            predict_steps=8, dt=0.1,  # 8步×0.1s=0.8s 预测, 让转向有时间生效
             max_v=self.robot.max_v, max_omega=self.robot.max_omega,
             n_v=n_v, n_omega=n_omega, world=self.world
         )
@@ -451,12 +486,12 @@ class ControlNode(Node):
                 v_target = min(v_target, -0.3 + 1.3 * (real_dist / 0.5))
             if real_dist < 0.35 and not self._backing_up:
                 self._backing_up = True
-                self._backup_steps = 15  # 倒车 0.3s
+                self._backup_steps = 25  # 倒车 0.5s @ 50Hz
                 self._needs_replan = True
 
         # 纵向: 倒车时 PID 不接管, 直接设负速度; 正常时 PID 追 v_target
         if self._backing_up and self._backup_steps > 0:
-            v_cmd = -0.3  # 平滑倒车速度
+            v_cmd = -0.5  # 倒车速度
             self._backup_steps -= 1
         elif self._backing_up:
             self._backing_up = False
@@ -470,6 +505,23 @@ class ControlNode(Node):
 
     def _control_unified(self):
         v_cmd, omega = self.unified_mpc.compute(self.robot, self.current_path)
+
+        # 安全备份: robot 当前位置离障碍物太近 → 倒车 + 通知 BT
+        if self.world is not None:
+            real_dist = self._min_obstacle_dist(self.robot.x, self.robot.y)
+            if real_dist < 0.5:  # 减速
+                v_cmd = min(v_cmd, -0.3 + 1.3 * (real_dist / 0.5))
+            if real_dist < 0.35 and not self._backing_up:  # 倒车
+                self._backing_up = True
+                self._backup_steps = 25  # 0.5s × 50Hz = 25步, 倒约 0.5m
+                self._needs_replan = True
+
+        if self._backing_up and self._backup_steps > 0:
+            v_cmd = -0.5
+            self._backup_steps -= 1
+        elif self._backing_up:
+            self._backing_up = False
+
         return v_cmd, omega
 
     # ─── Shared helpers ───────────────────────────────────────────
@@ -552,7 +604,7 @@ if __name__ == "__main__":
         print(f"  Lateral: MPC ({ctrl.mpc.n_samples*2+1} ω candidates)")
         print(f"  Longitudinal: PID (Kp={ctrl.pid.kp}, Ki={ctrl.pid.ki}, Kd={ctrl.pid.kd})")
     else:
-        nv = ctrl.unified_mpc.n_v
+        nv = ctrl.unified_mpc.n_v + 1  # +(-0.3)
         nw = ctrl.unified_mpc.n_omega * 2 + 1
         print(f"  Unified MPC: {nv}v x {nw}ω = {nv*nw} candidates, "
               f"{nv*nw*ctrl.unified_mpc.predict_steps} cost evals/tick")

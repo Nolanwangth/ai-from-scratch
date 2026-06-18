@@ -137,14 +137,29 @@ class DecisionNode(Node):
             "path_blocked": False,
             "recovery_count": 0,
             "navigation_done": False,
-            "robot": None,          # set by demo
-            "trigger_replan": None, # set by demo: fn() to invalidate plan
         }
 
         self.create_publisher("/goal_point", "Pose")
         self.create_publisher("/decision_state", "str")
+
+        # ── Action: /navigate_to_goal — 别的 Node 发导航目标, 我们处理 ──
+        self.create_action_server("/navigate_to_goal",
+                                  self._navigate_action_execute,
+                                  self._navigate_action_cancel)
         self._build_tree()
         log_ok(f"[decision] BT ready ({self.state})")
+
+    def _navigate_action_execute(self, goal, feedback, is_cancelled):
+        """Action 执行: 收到导航目标 → 设目标 → 等到达."""
+        target = goal.target
+        self.set_goal(target[0], target[1])
+        log_ok(f"  [decision] Action: navigating to ({target[0]:.1f}, {target[1]:.1f})")
+        # 返回, 实际导航在控制循环里跑
+        return type('obj', (object,), {'success': True, 'message': 'goal accepted'})()
+
+    def _navigate_action_cancel(self):
+        log_warn(f"  [decision] Action cancelled")
+        self.state = "IDLE"
 
     def _build_tree(self):
         """

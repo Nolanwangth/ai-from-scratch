@@ -318,7 +318,36 @@ class ActionManager:
 
 
 # ────────────────────────────────────────────────────────────────────────
-# 概念 4: Node (节点) — ROS2 的最小单元
+# 概念 4: Parameter (参数) — 节点的配置变量
+# ────────────────────────────────────────────────────────────────────────
+# 场景: PID 的 Kp/Ki/Kd 应该做成参数, 运行中可调
+# 真实 ROS2: node.declare_parameter("kp", 1.5)
+#            node.get_parameter("kp").value
+
+class ParameterManager:
+    """全局参数管理器 — 每个 Node 的参数存在这里."""
+    _params: Dict[str, Any] = {}
+
+    @classmethod
+    def declare(cls, node_name: str, name: str, value: Any, description: str = ""):
+        full_name = f"{node_name}.{name}"
+        cls._params[full_name] = value
+        log_info(f"  [{node_name}] Param /{name} = {value}")
+
+    @classmethod
+    def set_param(cls, node_name: str, name: str, value: Any):
+        full_name = f"{node_name}.{name}"
+        if full_name in cls._params:
+            cls._params[full_name] = value
+            log_info(f"  [{node_name}] Param /{name} updated -> {value}")
+
+    @classmethod
+    def get(cls, node_name: str, name: str) -> Optional[Any]:
+        return cls._params.get(f"{node_name}.{name}")
+
+
+# ────────────────────────────────────────────────────────────────────────
+# 概念 5: Node (节点) — ROS2 的最小单元
 # ────────────────────────────────────────────────────────────────────────
 # Node = 一个独立的 "小程序", 有自己的:
 #   - 名字 (唯一标识)
@@ -434,6 +463,19 @@ class Node:
         client = ActionClient(action_name)
         self._action_clients.append(client)
         return client
+
+    # ── 参数 (Parameter) ──
+    def declare_parameter(self, name: str, value: Any, description: str = ""):
+        """声明一个参数, 运行时可通过 ros2 param set 修改."""
+        ParameterManager.declare(self.node_name, name, value, description)
+
+    def get_parameter(self, name: str) -> Optional[Any]:
+        """读取参数值."""
+        return ParameterManager.get(self.node_name, name)
+
+    def set_parameter(self, name: str, value: Any):
+        """修改参数值."""
+        ParameterManager.set_param(self.node_name, name, value)
 
     # ── 定时器 ──
     def create_timer(self, interval_sec: float, callback: Callable):
@@ -732,54 +774,63 @@ def log_ok(msg: str):
 # ============================================================================
 
 def explain_ros2_dataflow():
-    """
-    ROS2 里数据怎么在节点间流动:
-    这个图是整个导航系统的核心
-    """
     print(f"""
-    ROS2 数据流 (导航系统):
+    ROS2 导航系统 — 完整数据流 (Topic + Service + Action + Parameter)
+    ====================================================================
 
-            D435 传感器
-               │
-               ▼
-    ┌──────────────────────┐
-    │ Perception Node      │  ← 发布 /camera/image, /camera/depth, /imu
-    │ 感知节点              │
-    └──────┬───────────────┘
-           │ /camera/image, /camera/depth
-           ▼
-    ┌──────────────────────┐
-    │ RTAB-Map SLAM Node   │  ← 订阅图像, 发布 /map, /odom, /tf
-    │ SLAM 节点             │
-    └──────┬───────────────┘
-           │ /map (占据栅格), /odom (位姿)
-           ▼
-    ┌──────────────────────┐
-    │ Costmap Node         │  ← 订阅地图, 发布 /costmap (带膨胀的)
-    │ 代价地图节点           │
-    └──────┬───────────────┘
-           │ /costmap
-           ▼
-    ┌──────────────────────┐
-    │ Decision Node        │  ← Behavior Tree: "下一步怎么办?"
-    │ 决策节点              │
-    └──────┬───────────────┘
-           │ 目标点 (2D Pose)
-           ▼
-    ┌──────────────────────┐
-    │ Planner Node (A*)    │  ← 订阅 /costmap + /odom + 目标
-    │ 全局规划节点           │     发布 /plan (全局路径)
-    └──────┬───────────────┘
-           │ /plan
-           ▼
-    ┌──────────────────────┐
-    │ Controller Node      │  ← 订阅 /plan + /odom
-    │ 控制节点              │     横向: MPC, 纵向: PID
-    └──────┬───────────────┘    发布 /cmd_vel
-           │ /cmd_vel (v, ω)
-           ▼
-       车轮电机 ← 硬件
+    ═══ Topic (7 条) — 高频异步数据流 ═══
 
-    所有节点通过 ROS2 Topic 通信, 互不知晓对方存在。
-    这就是 ROS2 的模块化设计。
+      Perception          SLAM               Costmap
+      (sensor_node)       (rtabmap_node)     (costmap_node)
+           │ /odom ──────────> │                   │
+           │ /camera/*         │ /map ────────────> │
+           │                   │                   │ /costmap ───────┐
+           │                   │                   │                 │
+           │                   │                   ▼                 ▼
+           │                   │              Planner (A*)      Controller
+           │                   │                   │                 │
+           │                   │                   │ /plan ─────── > │
+           │                   │                   │                 │ /cmd_vel
+           │                   │                   │                 ▼
+           │                   │                   │            Robot wheels
+
+      Decision (decision_node):
+          Topic: /goal_point → 发给 Planner
+          Topic: /decision_state → 外部监控
+
+
+    ═══ Service (1 条) — 请求/响应 ═══
+
+      /get_map  (SLAM Node 提供)
+          Client: "给我当前地图"
+          Server: "这是地图数据"
+          用在哪: Planner 初始化或别的 Node 需要地图快照时
+
+
+    ═══ Action (1 条) — 带反馈的长任务 ═══
+
+      /navigate_to_goal  (Decision Node 提供)
+          Goal:    "导航到 (8.0, 8.0)"
+          Feedback: 进度 (走到哪了, 还有多远)
+          Result:   到达 / 失败 / 取消
+          用在哪: 用户或上层系统下发导航指令
+
+
+    ═══ Parameter — 节点配置, 运行时可调 ═══
+
+      Controller Node 参数:
+          /kp   = 1.5    PID 比例增益  (ros2 param set /control_node kp 2.0)
+          /ki   = 0.3    PID 积分增益
+          /kd   = 0.1    PID 微分增益
+          /max_v = 1.0   最大速度 (m/s)
+          用在哪: 运行时调 PID, 不需要重新编译/重启
+
+
+    ═══ 5 个通信原语全用了 ═══
+
+      Topic    ✅ 7 条 — 感知/SLAM/Costmap/决策/规划/控制全走 Topic
+      Service  ✅ 1 条 — SLAM 提供 /get_map 给其他 Node 查询
+      Action   ✅ 1 条 — Decision 提供 /navigate_to_goal 给上层调用
+      Parameter ✅ 4 条 — ControlNode 的 kp/ki/kd/max_v, 运行时在线调
+      Node     ✅ 6 个 — 各管一摊, 边界清晰
     """)
