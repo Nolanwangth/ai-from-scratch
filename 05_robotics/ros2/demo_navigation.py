@@ -132,8 +132,8 @@ def demo_explain_architecture():
     """)
 
 
-def demo_run_navigation_viz(control_mode="split"):
-    """带可视化窗口的导航"""
+def demo_run_navigation(control_mode="split", use_viz=False):
+    """跑完整导航。use_viz=True 弹出 matplotlib 三面板可视化窗口。"""
     print_banner()
 
     world = World2D()
@@ -141,7 +141,7 @@ def demo_run_navigation_viz(control_mode="split"):
     robot.max_v = 1.0
     robot.max_omega = 2.0
 
-    # 初始化所有节点
+    # ── 初始化所有节点 ──
     perception = PerceptionNode(world, robot, hz=30.0)
     slam = RTABMapNode(world, robot, keyframe_min_dist=0.3, hz=10.0)
     costmap = CostmapNode(robot_radius=0.3, inflation_radius=0.5)
@@ -150,22 +150,24 @@ def demo_run_navigation_viz(control_mode="split"):
     planner = AStarPlannerNode(world)
     controller = ControlNode(world, robot, hz=50.0, mode=control_mode)
 
-    # Wire BT recovery to replanning: when BT says "replan", invalidate plan
+    # BT 重规划回调: BT 说 "重算" → 置空 plan
     def _bt_trigger_replan():
         nonlocal plan
         plan = None
     decision.context["trigger_replan"] = _bt_trigger_replan
 
-    # 设置目标
+    # ── 设置目标 ──
     goal_x, goal_y = world.landmarks["workstation"]
     decision.set_goal(goal_x, goal_y)
 
-    # 初始化可视化
-    viz = NavigationVisualizer(world)
-    viz.goal = (goal_x, goal_y)
-    log_ok("Visualization window open — robot is running!")
+    # ── 可视化 (可选) ──
+    viz = None
+    if use_viz:
+        viz = NavigationVisualizer(world)
+        viz.goal = (goal_x, goal_y)
+        log_ok("可视化窗口已打开")
 
-    # 初始地图
+    # ── 初始地图 + costmap ──
     from ros2_nav_course.utils.mock_ros2 import Odometry as OdomMsg
     for _ in range(5):
         x, y, t = robot.get_pose()
@@ -175,18 +177,18 @@ def demo_run_navigation_viz(control_mode="split"):
     planner.latest_costmap = costmap.costmap
     controller.costmap = costmap.costmap
 
-
-    # 初算路径
+    # ── 初算路径 ──
     planner.set_pose(robot.x, robot.y)
     planner.set_goal(goal_x, goal_y)
     plan = planner.plan()
     if plan:
         controller.set_path(plan)
+        if not use_viz:
+            log_ok(f"  初始路径: {len(plan)} 个航点 (A*)")
 
-    # 主循环
+    # ── 主控制循环 (50Hz) ──
     max_steps = 2000
     reached = False
-    dynamic_obstacle = None
     bt_triggered = False
 
     for step in range(max_steps):
@@ -197,25 +199,24 @@ def demo_run_navigation_viz(control_mode="split"):
             x, y, t = robot.get_pose()
             slam._odom_callback(OdomMsg(pose=Pose(x, y, t)))
 
-        # Dynamic obstacle: drop at step 400 (~8s), 2/3 along path (ahead of robot)
+        # 动态障碍物: 第 400 步在路径前方掉落一个 BOX
         if step == 400:
             from ros2_nav_course.simulation.world_2d import Obstacle
             idx = min(len(plan) * 2 // 3, len(plan) - 1) if plan else 0
             bx, by = plan[idx] if plan else (5.0, 5.0)
             if math.sqrt((bx-robot.x)**2 + (by-robot.y)**2) < 1.5:
                 bx, by = robot.x + 2.0, robot.y + 2.0
-            dynamic_obstacle = Obstacle(bx, by, 1.0, 1.0, "BOX!")
-            world.obstacles.append(dynamic_obstacle)
-            # Immediately regenerate costmap so A* sees the new obstacle
+            world.obstacles.append(Obstacle(bx, by, 1.0, 1.0, "BOX!"))
+            # 立刻重建 costmap 让 A* 看到新障碍物
             slam._tick()
             costmap._inflate_and_publish()
             planner.latest_costmap = costmap.costmap
             controller.costmap = costmap.costmap
-
-            viz.update_costmap(costmap.costmap)
-            viz.refresh_obstacles()
-            log_warn(f"  ⚡ Dynamic obstacle appeared at ({bx:.1f}, {by:.1f})!")
-            plan = None  # force replan
+            if viz:
+                viz.update_costmap(costmap.costmap)
+                viz.refresh_obstacles()
+            log_warn(f"  ⚡ 动态障碍物出现在 ({bx:.1f}, {by:.1f})!")
+            plan = None
             decision.context["path_blocked"] = True
 
         if step % 20 == 0:
@@ -224,17 +225,13 @@ def demo_run_navigation_viz(control_mode="split"):
             planner.latest_costmap = costmap.costmap
             controller.costmap = costmap.costmap
 
-
-        # 每 2 秒重规划 (正常维护) 或 path_blocked 时立即重规划
+        # 重规划: path_blocked 时立即, 否则每 2 秒维护
         if plan is None or step % 100 == 0:
             was_blocked = decision.context.get("path_blocked", False)
-
-            # BT 运行: 被堵则递进恢复 (SlowRetry → Backup → Spin → Abort)
             if was_blocked:
                 decision.bt_root.tick(decision.context)
                 bt_triggered = True
             else:
-                # 路段通畅: 重置恢复计数
                 decision.context["recovery_count"] = 0
 
             planner.set_pose(robot.x, robot.y)
@@ -244,188 +241,68 @@ def demo_run_navigation_viz(control_mode="split"):
                 controller.set_path(plan)
                 decision.context["path_blocked"] = False
                 if was_blocked:
-                    log_ok(f"  ↻ Replanned: {len(plan)} waypoints (recovery #{decision.context.get('recovery_count', 0)})")
+                    log_ok(f"  ↻ 重规划: {len(plan)} 航点 (第{decision.context.get('recovery_count',0)}次恢复)")
             elif was_blocked:
-                log_warn("  ⚠ A* still can't find a path after recovery")
+                log_warn("  ⚠ A* 仍无路!")
 
         controller._control_loop()
 
-        # Emergency stop fired → immediate BT replan
+        # 控制层触发紧急重规划 (障碍物太近)
         if controller._needs_replan:
             controller._needs_replan = False
             decision.context["path_blocked"] = True
             plan = None
 
-        # Visualization: ~6Hz render
-        if step % 8 == 0:
+        # 可视化渲染 (~6Hz)
+        if viz and step % 8 == 0:
             if costmap.costmap is not None:
                 viz.update_costmap(costmap.costmap)
-
             kf_list = [(kf.x, kf.y) for kf in slam.wm.values()]
             kf_list += [(kf.x, kf.y) for kf in slam.stm]
-            viz.draw(
-                robot.x, robot.y, robot.theta,
-                robot.v, robot.omega,
-                path=plan,
-                kfs=kf_list,
-                n_loops=slam.n_loops,
-                wm_size=len(slam.wm),
-                goal=(goal_x, goal_y),
-                step=step,
-            )
+            viz.draw(robot.x, robot.y, robot.theta, robot.v, robot.omega,
+                     path=plan, kfs=kf_list, n_loops=slam.n_loops,
+                     wm_size=len(slam.wm), goal=(goal_x, goal_y), step=step)
 
         dist_to_goal = math.sqrt((robot.x - goal_x)**2 + (robot.y - goal_y)**2)
         if dist_to_goal < 0.3:
-            viz.draw(robot.x, robot.y, robot.theta, robot.v, robot.omega,
-                       path=plan, kfs=[], n_loops=slam.n_loops,
-                       wm_size=len(slam.wm), goal=(goal_x, goal_y), step=step)
-            viz.finalize(True)
-            log_ok(f"\n🏁 到达工位! (误差 {dist_to_goal:.2f}m) 总步数={step}")
+            if viz:
+                viz.draw(robot.x, robot.y, robot.theta, robot.v, robot.omega,
+                         path=plan, kfs=[], n_loops=slam.n_loops,
+                         wm_size=len(slam.wm), goal=(goal_x, goal_y), step=step)
+                viz.finalize(True)
+            log_ok(f"\n🏁 到达工位! (误差 {dist_to_goal:.2f}m) 步数={step}")
             reached = True
             break
 
     if not reached:
-        viz.finalize(False)
+        if viz:
+            viz.finalize(False)
         log_warn(f"未到达 (距离 {dist_to_goal:.2f}m)")
 
-    return reached
-
-
-def demo_run_navigation(control_mode="split"):
-    print_banner()
-
-    world = World2D()
-    robot = DifferentialDriveRobot(x=1.0, y=1.0, theta=0.0)
-    robot.max_v = 1.0
-    robot.max_omega = 2.0
-
-    # ── 初始化所有节点 ──
-    log_ok("初始化 ROS2 节点...")
-
-    perception = PerceptionNode(world, robot, hz=30.0)
-    slam = RTABMapNode(world, robot, keyframe_min_dist=0.5, hz=10.0)
-    costmap = CostmapNode(robot_radius=0.3, inflation_radius=0.5)
-    decision = DecisionNode(world)
-    decision.context["robot"] = robot
-    planner = AStarPlannerNode(world)
-    controller = ControlNode(world, robot, hz=50.0, mode=control_mode)
-
-    log_ok("初始化 ROS2 节点... done")
-
-    # ── 设置目标 ──
-    goal_x, goal_y = world.landmarks["workstation"]
-    decision.set_goal(goal_x, goal_y)
-
-    log_ok(f"目标: workstation ({goal_x:.1f}, {goal_y:.1f})")
-    log_ok(f"起点: 充电桩 (1.0, 1.0)")
-    log_ok("开始导航! 50Hz 控制循环\n")
-
-    # ── 先建初始地图 + costmap ──
-    # 让 SLAM 跑几帧建地图
-    from ros2_nav_course.utils.mock_ros2 import Odometry as OdomMsg
-    for _ in range(5):
-        x, y, t = robot.get_pose()
-        odom = OdomMsg(pose=Pose(x, y, t))
-        slam._odom_callback(odom)
-
-    slam._tick()  # 发布 /map → costmap 订阅回调
-    costmap._inflate_and_publish()
-    planner.latest_costmap = costmap.costmap
-    controller.costmap = costmap.costmap
-
-
-    # ── 初算路径 ──
-    planner.set_pose(robot.x, robot.y)
-    planner.set_goal(goal_x, goal_y)
-    plan = planner.plan()
-    if plan:
-        controller.set_path(plan)
-        log_ok(f"  初始路径: {len(plan)} 个航点 (A*)")
-    else:
-        log_warn("  A* 无路! 目标被挡住了, 继续尝试...")
-
-    bt_triggered = False
-    # ── 主控制循环 (50Hz) ──
-    max_steps = 2000
-    dt = 1.0 / 50
-    reached = False
-    dist_to_goal = 999.0
-
-    for step in range(max_steps):
-        # 1. 感知: 读传感器, 发布 /odom (30Hz = 隔帧)
-        if step % 2 == 0:
-            perception._sensor_callback()
-
-        # 2. SLAM: 处理 odom, 建图 (10Hz)
-        if step % 5 == 0:
-            x, y, t = robot.get_pose()
-            odom = OdomMsg(pose=Pose(x, y, t))
-            slam._odom_callback(odom)
-
-        # 3. Costmap: 收到新地图后膨胀
-        if step % 20 == 0:
-            slam._tick()  # 发布 /map
-            costmap._inflate_and_publish()
-            planner.latest_costmap = costmap.costmap
-            controller.costmap = costmap.costmap
-
-
-        # 4. 决策 + 重规划: 每 100 步 (2 秒) 检查
-        if plan is None or step % 100 == 0:
-            planner.set_pose(robot.x, robot.y)
-            new_plan = planner.plan()
-            if new_plan:
-                plan = new_plan
-                controller.set_path(plan)
-
-        # 5. 控制: MPC + PID
-        controller._control_loop()
-        if controller._needs_replan:
-            controller._needs_replan = False
-            plan = None
-
-        # 6. 检查到达
-        dist_to_goal = math.sqrt((robot.x - goal_x)**2 + (robot.y - goal_y)**2)
-        if dist_to_goal < 0.3:
-            log_ok(f"\n🏁 到达工位! (误差 {dist_to_goal:.2f}m) 总步数={step}")
-            decision.context["navigation_done"] = True
-            reached = True
-            break
-
-    if not reached:
-        log_warn(f"未到达目标 (最后距离 {dist_to_goal:.2f}m)")
-
-    # 打印最终统计
-    print_separator("最终统计")
-    print(f"  总步数:          {step}")
-    print(f"  到达目标:        {'✅ 是' if reached else '❌ 否'}")
-    print(f"  最终距离:        {dist_to_goal:.2f}m")
-    print(f"  最终位置:        ({robot.x:.2f}, {robot.y:.2f}, {robot.theta:.2f}rad)")
-    print(f"  SLAM:           {slam.memory_summary()}")
-    print(f"  Costmap:        {'✅' if costmap.costmap else '❌'}")
-    if planner.latest_path:
-        print(f"  A* 路径:         {len(planner.latest_path)} 航点")
-    print(f"  控制步数:        {controller.n_control_steps}")
-    if controller.track_error_history:
-        import numpy as np
-        errors = controller.track_error_history
-        print(f"  跟踪误差:        平均={np.mean(errors):.3f}m, 最大={np.max(errors):.3f}m")
-
-    print_separator("节点状态")
-    print(f"  Perception:     ✅ (D435 -> /odom, /camera/*)")
-    print(f"  SLAM:           ✅ (RTAB-Map -> /map, /pose)")
-    print(f"  Costmap:        ✅ (inflation -> /costmap)")
-    print(f"  Decision:       ✅ (Behavior Tree: {decision.state})")
-    print(f"    -> BT triggered: {'YES - dynamic obstacle!' if bt_triggered else 'no (path was clear)'}")
-    print(f"  Planner:        ✅ (A* -> /plan)")
-    print(f"  Controller:     ✅ (MPC lateral + PID longitudinal -> /cmd_vel)")
-
-    if bt_triggered:
-        print(f"\n  🎯 Behavior Tree just did its job:")
-        print(f"    1. Path blocked -> Condition 'PathOk?' returned FAILURE")
-        print(f"    2. Fallback -> tried RecoverySpin branch")
-        print(f"    3. A* replanned around the dynamic obstacle")
-        print(f"    4. Robot continued on new path -> reached goal")
+    # ── 最终统计 (终端模式打印详细表格) ──
+    if not use_viz:
+        print_separator("最终统计")
+        print(f"  总步数:          {step}")
+        print(f"  到达目标:        {'✅ 是' if reached else '❌ 否'}")
+        print(f"  最终距离:        {dist_to_goal:.2f}m")
+        print(f"  最终位置:        ({robot.x:.2f}, {robot.y:.2f}, {robot.theta:.2f}rad)")
+        print(f"  SLAM:           {slam.memory_summary()}")
+        if planner.latest_path:
+            print(f"  A* 路径:         {len(planner.latest_path)} 航点")
+        print(f"  控制步数:        {controller.n_control_steps}")
+        if controller.track_error_history:
+            import numpy as np
+            errors = controller.track_error_history
+            print(f"  跟踪误差:        平均={np.mean(errors):.3f}m, 最大={np.max(errors):.3f}m")
+        print_separator("节点状态")
+        print(f"  Perception:     ✅  /odom, /camera/*")
+        print(f"  SLAM:           ✅  /map, /pose (STM→WM→LTM)")
+        print(f"  Costmap:        ✅  /costmap (膨胀)")
+        print(f"  Decision:       ✅  BT: {decision.state}")
+        print(f"  Planner:        ✅  A* → /plan")
+        print(f"  Controller:     ✅  {control_mode} → /cmd_vel")
+        if bt_triggered:
+            print(f"\n  🎯 BT 触发: 路径被堵 → 重规划 → 绕行成功")
 
     return reached
 
@@ -463,8 +340,8 @@ if __name__ == "__main__":
 
     if "--viz" in args:
         import numpy as np
-        demo_run_navigation_viz(control_mode)
+        demo_run_navigation(control_mode, use_viz=True)
 
     elif "--run" in args:
         import numpy as np
-        demo_run_navigation(control_mode)
+        demo_run_navigation(control_mode, use_viz=False)

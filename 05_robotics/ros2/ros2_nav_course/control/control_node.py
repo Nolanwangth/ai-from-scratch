@@ -475,30 +475,13 @@ class ControlNode(Node):
     # ─── Shared helpers ───────────────────────────────────────────
 
     def _min_obstacle_dist(self, x, y):
-        """返回 (x,y) 到最近障碍物的距离 (m)."""
+        """返回 (x,y) 到最近障碍物的距离 (m), 供 split 模式实时限速用."""
         if self.world is None:
             return float('inf')
         md = float('inf')
         for obs in self.world.obstacles + self.world.walls:
             md = min(md, obs.distance_to(x, y))
         return md
-
-    def _check_collision(self, v, omega):
-        if self.world is None:
-            return False
-        x, y, theta = self.robot.x, self.robot.y, self.robot.theta
-        for _ in range(10):
-            x += v * math.cos(theta) * 0.05
-            y += v * math.sin(theta) * 0.05
-            theta += omega * 0.05
-            if self.world.is_collision(x, y, 0.25):
-                return True
-        return self.world.is_collision(self.robot.x, self.robot.y, 0.25)
-
-    def _emergency_stop(self):
-        self.robot.set_velocity(0.0, 0.0)
-        self.pid.reset() if self.pid else None
-        log_warn("  [CTRL] EMERGENCY STOP — obstacle dead ahead!")
 
     def _control_loop(self):
         self.n_control_steps += 1
