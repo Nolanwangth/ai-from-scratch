@@ -1,3 +1,4 @@
+# 运行: conda activate diffusion && python 03_diffusion/01_forward_diffusion.py
 """
 Forward Diffusion — 逐步把真实图像变成纯噪声
 ==================================================

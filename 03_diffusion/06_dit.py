@@ -1,3 +1,4 @@
+# 运行: conda activate diffusion && python 03_diffusion/06_dit.py
 """
 DiT (Diffusion Transformer) — 用 Transformer 替换 U-Net
 =========================================================

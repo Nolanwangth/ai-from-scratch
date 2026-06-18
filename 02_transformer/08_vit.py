@@ -1,3 +1,4 @@
+# 运行: conda activate diffusion && python 02_transformer/08_vit.py
 """
 ViT (Vision Transformer) — 把图像变成 token
 ===============================================

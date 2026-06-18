@@ -1,3 +1,4 @@
+# 运行: conda activate diffusion && python 04_rl/02_ppo.py
 """
 PPO (Proximal Policy Optimization) — RL 的工业标准
 =====================================================

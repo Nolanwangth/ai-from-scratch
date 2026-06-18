@@ -1,3 +1,4 @@
+# 运行: conda activate diffusion && python 01_foundations/01_python_basics.py
 """
 Python 基础完整版 — AI 工程师必知必会
 ======================================

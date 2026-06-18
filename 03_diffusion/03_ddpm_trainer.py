@@ -1,3 +1,4 @@
+# 运行: conda activate diffusion && python 03_diffusion/03_ddpm_trainer.py
 """
 DDPM Trainer — 训练 + 采样
 ============================

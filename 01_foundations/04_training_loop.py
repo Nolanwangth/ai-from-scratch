@@ -1,3 +1,4 @@
+# 运行: conda activate diffusion && python 01_foundations/04_training_loop.py
 """
 The Universal Training Loop — 所有 AI 训练都长这样
 =====================================================

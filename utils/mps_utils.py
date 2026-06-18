@@ -1,3 +1,4 @@
+# 运行: conda activate diffusion && python utils/mps_utils.py
 """
 MPS (Metal Performance Shaders) 加速工具
 =========================================

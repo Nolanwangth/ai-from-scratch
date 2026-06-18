@@ -1,3 +1,4 @@
+# 运行: conda activate diffusion && python 02_transformer/03_transformer_block.py
 """
 Transformer Block — 把组件拼成积木
 =====================================

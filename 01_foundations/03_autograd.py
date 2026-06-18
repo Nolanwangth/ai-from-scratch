@@ -1,3 +1,4 @@
+# 运行: conda activate diffusion && python 01_foundations/03_autograd.py
 """
 Autograd — PyTorch 的自动微分引擎
 ===================================

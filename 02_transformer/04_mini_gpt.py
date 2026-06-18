@@ -1,3 +1,4 @@
+# 运行: conda activate diffusion && python 02_transformer/04_mini_gpt.py
 """
 Mini-GPT: 从零实现 Decoder-Only Transformer
 =============================================

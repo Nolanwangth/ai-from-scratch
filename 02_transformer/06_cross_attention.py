@@ -1,3 +1,4 @@
+# 运行: conda activate diffusion && python 02_transformer/06_cross_attention.py
 """
 Cross-Attention — VLA 的多模态桥梁
 =====================================

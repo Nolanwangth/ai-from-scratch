@@ -1,3 +1,4 @@
+# 运行: conda activate diffusion && python 03_diffusion/02_unet_denoiser.py
 """
 U-Net Denoiser — 噪声预测网络
 ================================

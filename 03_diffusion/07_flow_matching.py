@@ -1,3 +1,4 @@
+# 运行: conda activate diffusion && python 03_diffusion/07_flow_matching.py
 """
 Flow Matching — 扩散模型的现代进化版
 =======================================

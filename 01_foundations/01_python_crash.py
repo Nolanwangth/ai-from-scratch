@@ -1,3 +1,5 @@
+# 运行: conda activate diffusion && python 01_foundations/01_python_crash.py
+#       (纯标准库，任意 env 都可以)
 """
 Python 速成 — AI 工程师必须掌握的 20%
 =========================================

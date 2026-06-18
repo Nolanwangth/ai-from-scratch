@@ -1,3 +1,4 @@
+# 运行: conda activate diffusion && python 02_transformer/02_positional_encoding.py
 """
 Positional Encoding — 告诉模型词的位置
 =========================================

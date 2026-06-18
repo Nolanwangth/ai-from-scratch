@@ -1,3 +1,5 @@
+# 运行: conda activate diffusion && python 06_harness/02_prompt_template.py
+#       (纯标准库，任意 env 都可以)
 """
 Prompt Template — LLM 调用的标准模式
 ======================================

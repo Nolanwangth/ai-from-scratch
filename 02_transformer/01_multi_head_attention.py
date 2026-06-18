@@ -1,3 +1,4 @@
+# 运行: conda activate diffusion && python 02_transformer/01_multi_head_attention.py
 """
 Multi-Head Self-Attention — Transformer 的心脏
 ================================================

@@ -1,3 +1,4 @@
+# 运行: conda activate diffusion && python 02_transformer/07_encoder_decoder.py
 """
 Encoder-Decoder Transformer — 完整的序列到序列模型
 =======================================================

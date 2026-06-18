@@ -1,3 +1,4 @@
+# 运行: conda activate diffusion && python 06_harness/01_model_registry.py
 """
 Model Registry — 生产级模型管理
 ==================================

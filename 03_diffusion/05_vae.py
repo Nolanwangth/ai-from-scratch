@@ -1,3 +1,4 @@
+# 运行: conda activate diffusion && python 03_diffusion/05_vae.py
 """
 VAE (Variational Autoencoder) — 从像素到潜空间的桥梁
 ========================================================

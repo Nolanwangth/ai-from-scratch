@@ -1,3 +1,4 @@
+# 运行: conda activate diffusion && python 03_diffusion/04_train_on_cifar10.py
 """
 训练 Diffusion 模型生成 CIFAR-10 图像
 ======================================

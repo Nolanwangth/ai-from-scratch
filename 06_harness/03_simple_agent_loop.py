@@ -1,3 +1,5 @@
+# 运行: conda activate diffusion && python 06_harness/03_simple_agent_loop.py
+#       (纯标准库，任意 env 都可以)
 """
 Simple Agent Loop — AI Agent 的完整实现
 ==========================================

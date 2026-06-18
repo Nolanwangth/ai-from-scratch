@@ -1,3 +1,4 @@
+# 运行: conda activate diffusion && python 04_rl/01_policy_gradient.py
 """
 Policy Gradient (REINFORCE) — RL 的起点
 =========================================

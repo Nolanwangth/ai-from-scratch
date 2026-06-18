@@ -1,3 +1,4 @@
+# 运行: conda activate diffusion && python 04_rl/03_rlhf_pipeline.py
 """
 RLHF Pipeline — 从 Policy Gradient 到对齐 LLM
 ================================================

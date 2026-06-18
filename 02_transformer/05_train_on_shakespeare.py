@@ -1,3 +1,4 @@
+# 运行: conda activate diffusion && python 02_transformer/05_train_on_shakespeare.py
 """
 训练 Mini-GPT 生成莎士比亚风格文本
 ====================================
