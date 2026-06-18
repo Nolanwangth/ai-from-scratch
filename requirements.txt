@@ -1,0 +1,7 @@
+# AI From Scratch — 最小依赖
+# 你的 diffusion 环境已经装了这些，直接 conda activate diffusion 即可
+torch>=2.0.0
+torchvision>=0.15.0
+numpy>=1.24.0
+matplotlib>=3.7.0
+tqdm>=4.65.0

@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project (large files)
+checkpoints/
+outputs/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Conda
+.python-version
