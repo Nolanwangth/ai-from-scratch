@@ -61,30 +61,33 @@ class LateralMPC:
             cost = self._rollout(robot, path, v, omega)
             if cost < best_cost:
                 best_cost, best_omega = cost, omega
-        alpha = 0.65
+        alpha = 0.7
         self.current_omega = alpha * best_omega + (1 - alpha) * self.current_omega
         return self.current_omega
 
     def _rollout(self, robot, path, v, omega):
         x, y, theta = robot.x, robot.y, robot.theta
         total = 0.0
+        # 前看距离 = 预测时间的 2x, 给 MPC 一个"前方方向"的信号
+        look_ahead = max(2, int(v / 0.15))  # v(m/s) → 路径点数 (间距~0.15m)
         for step in range(self.predict_steps):
             x += v * math.cos(theta) * self.dt
             y += v * math.sin(theta) * self.dt
             theta += omega * self.dt
-            min_dist = min(math.sqrt((x-px)**2 + (y-py)**2) for px, py in path)
+
             best_idx = min(range(len(path)),
                            key=lambda i: math.sqrt((x-path[i][0])**2+(y-path[i][1])**2))
-            look = min(best_idx + 8, len(path) - 1)   # 8点=1.2m超前, 紧跟路径方向
+            look = min(best_idx + look_ahead, len(path) - 1)
             p_cur, p_look = path[best_idx], path[look]
             path_dir = math.atan2(p_look[1]-p_cur[1], p_look[0]-p_cur[0])
+
+            cte = math.sqrt((x-p_cur[0])**2 + (y-p_cur[1])**2)
             heading_err = abs(theta - path_dir)
             heading_err = min(heading_err, 2*math.pi - heading_err)
-            goal = path[-1]
-            d_goal = math.sqrt((x-goal[0])**2 + (y-goal[1])**2)
+
             if self.world and self.world.is_collision(x, y, 0.24):
                 return 1e6
-            total += (min_dist*8.0 + heading_err*0.8 + d_goal*0.5 + abs(omega)*0.05)
+            total += (cte*1.5 + heading_err*1.5 + abs(omega)*0.02)
         return total
 
 
@@ -377,6 +380,7 @@ class ControlNode(Node):
         self._backing_up = False
         self._backup_steps = 0
         self._stuck_steps = 0
+        self._prev_progress_d = float('inf')
 
         # --- Split-mode components ---
         self.mpc = None
@@ -563,15 +567,22 @@ class ControlNode(Node):
         else:
             v_cmd, omega = self._control_unified()
 
-        # ── Stall detection: 长时间无法前进 → 倒车脱离 ──
+        # ── Stall / no-progress detection: 卡住或长时间无法接近目标 → 倒车脱离 ──
         if self.mode == "unified" and self.current_path and not self._backing_up:
             goal = self.current_path[-1]
             d_goal = math.sqrt((self.robot.x-goal[0])**2 + (self.robot.y-goal[1])**2)
-            # 有路径、离目标远、速度近零持续 50 帧 → 卡死了
-            if d_goal > 0.5 and abs(self.robot.v) < 0.05 and abs(self.robot.omega) < 0.05:
+            if d_goal > 0.5 and abs(self.robot.v) < 0.05:
                 self._stuck_steps += 1
             else:
                 self._stuck_steps = 0
+            # 目标进度检测: 每 300 步检查, 距离没缩短 0.3m 就判定为无法继续
+            if self.n_control_steps % 300 == 0:
+                prev = self._prev_progress_d
+                if prev < float('inf') and d_goal > 0.5 and d_goal > prev - 0.3:
+                    log_warn(f"  ⚠ unified 无进展 (距目标{d_goal:.1f}m→{prev:.1f}m), 倒车脱离!")
+                    self._backing_up = True
+                    self._backup_steps = 50
+                self._prev_progress_d = d_goal
             if self._stuck_steps > 50:
                 log_warn("  ⚠ unified 卡住, 倒车脱离!")
                 self._backing_up = True
