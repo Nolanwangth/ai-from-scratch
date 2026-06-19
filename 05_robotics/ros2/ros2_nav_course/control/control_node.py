@@ -43,7 +43,7 @@ class LateralMPC:
     Only controls steering. Speed comes from PID.
     """
 
-    def __init__(self, predict_steps=10, dt=0.02, max_omega=2.0, n_samples=20):
+    def __init__(self, predict_steps=10, dt=0.02, max_omega=2.0, n_samples=30):
         self.predict_steps = predict_steps
         self.dt = dt
         self.max_omega = max_omega
@@ -61,7 +61,7 @@ class LateralMPC:
             cost = self._rollout(robot, path, v, omega)
             if cost < best_cost:
                 best_cost, best_omega = cost, omega
-        alpha = 0.3
+        alpha = 0.65
         self.current_omega = alpha * best_omega + (1 - alpha) * self.current_omega
         return self.current_omega
 
@@ -75,7 +75,7 @@ class LateralMPC:
             min_dist = min(math.sqrt((x-px)**2 + (y-py)**2) for px, py in path)
             best_idx = min(range(len(path)),
                            key=lambda i: math.sqrt((x-path[i][0])**2+(y-path[i][1])**2))
-            look = min(best_idx + 20, len(path) - 1)  # 20点=1m超前, 用整体方向
+            look = min(best_idx + 8, len(path) - 1)   # 8点=1.2m超前, 紧跟路径方向
             p_cur, p_look = path[best_idx], path[look]
             path_dir = math.atan2(p_look[1]-p_cur[1], p_look[0]-p_cur[0])
             heading_err = abs(theta - path_dir)
@@ -84,10 +84,7 @@ class LateralMPC:
             d_goal = math.sqrt((x-goal[0])**2 + (y-goal[1])**2)
             if self.world and self.world.is_collision(x, y, 0.24):
                 return 1e6
-            collision = 0.0
-            w = 1.0 + step * 0.15
-            total += (min_dist*4.0 + heading_err*1.5 + d_goal*0.5 +
-                      collision + abs(omega)*0.1) * w
+            total += (min_dist*8.0 + heading_err*0.8 + d_goal*0.5 + abs(omega)*0.05)
         return total
 
 
@@ -316,15 +313,17 @@ class UnifiedMPC:
                 elif self.world.is_collision(x, y, 0.40):
                     cost = 50
             if cost >= 254:
-                collision = 500.0       # 致命区 (障碍物本体)
+                collision = 3000.0      # 致命区
             elif cost >= 100:
-                collision = cost * 0.3  # 膨胀区 (50→15, ~N/A for cost costmap)
+                collision = cost * 1.2  # 膨胀区 120→144, 强烈推开
                 near_obs = True
+            elif cost >= 80:
+                collision = cost * 0.3  # 未知区 80→24, 轻微惩罚 (尽量走已知)
             elif cost == 50:
-                collision = cost * 0.3  # 膨胀区
+                collision = cost * 0.6  # 膨胀区 50→30
                 near_obs = True
             else:
-                collision = 0.0         # 自由(0) / 未知(80) 不罚, 只管走
+                collision = 0.0         # 自由(0) 不罚
 
             # 速度惩罚
             overspeed = max(0.0, v - 1.0)  # 超速 = v > 1.0m/s
@@ -337,7 +336,7 @@ class UnifiedMPC:
 
         # 加速度平滑 (弱, 不让 v=0 永远赢)
         # 前进奖励: v 越大越优, 但倒车只有在避障代价需要时才会赢.
-        total -= v * 14.0
+        total -= v * 2.0
         return total
 
 
@@ -377,6 +376,7 @@ class ControlNode(Node):
         self._safety_stop_steps = 0
         self._backing_up = False
         self._backup_steps = 0
+        self._stuck_steps = 0
 
         # --- Split-mode components ---
         self.mpc = None
@@ -433,13 +433,13 @@ class ControlNode(Node):
         self.speed_profiler = SpeedProfiler(max_v=self.robot.max_v, min_v=0.3)
         self.speed_profiler.world = self.world  # 障碍物距离感知
         self.mpc = LateralMPC(
-            predict_steps=10, dt=self.dt,
-            max_omega=self.robot.max_omega, n_samples=20
+            predict_steps=20, dt=self.dt,
+            max_omega=self.robot.max_omega, n_samples=30
         )
         self.mpc.world = self.world
         self.pid = LongitudinalPID(
-            kp=1.5, ki=0.3, kd=0.1,
-            max_v=self.robot.max_v, max_accel=2.0
+            kp=2.5, ki=0.5, kd=0.08,
+            max_v=self.robot.max_v, max_accel=3.0
         )
         log_info("  [split] MPC(steering) + SpeedProfiler + PID(throttle) + emergency-stop")
 
@@ -448,7 +448,7 @@ class ControlNode(Node):
         n_v = 5
         n_omega = 10
         self.unified_mpc = UnifiedMPC(
-            predict_steps=6, dt=0.12,
+            predict_steps=6, dt=0.04,
             max_v=self.robot.max_v, max_omega=self.robot.max_omega,
             n_v=n_v, n_omega=n_omega, world=self.world
         )
@@ -473,10 +473,7 @@ class ControlNode(Node):
     # ─── Split mode control loop ──────────────────────────────────
 
     def _control_split(self):
-        # 横向: MPC 打方向盘
-        omega = self.mpc.compute_omega(self.robot, self.current_path, self.robot.v)
-
-        # 速度目标: 路径限速 + 机器人实际位置障碍物限速 (直接防撞)
+        # ── 先算速度: SpeedProfiler 限速 → PID 追速 ──
         if self.v_limits and self.current_path:
             best_idx = 0
             best_d = float('inf')
@@ -488,15 +485,15 @@ class ControlNode(Node):
         else:
             v_target = 0.5
 
-        # 用机器人真实位置查障碍物距离, 0.5m 开始减速, 0.35m 触发倒车+重规划
+        # 障碍物实时限速
         if self.world is not None:
             real_dist = self._min_obstacle_dist(self.robot.x, self.robot.y)
             if real_dist < 0.20:
                 v_target = min(v_target, max(0.05, real_dist / 0.20 * self.robot.max_v))
 
-        # 纵向: 倒车时 PID 不接管, 直接设负速度; 正常时 PID 追 v_target
+        # 倒车 or PID 追速
         if self._backing_up and self._backup_steps > 0:
-            v_cmd = -0.5  # 倒车速度
+            v_cmd = -0.5
             self._backup_steps -= 1
         elif self._backing_up:
             self._backing_up = False
@@ -504,7 +501,15 @@ class ControlNode(Node):
         else:
             v_cmd = self.pid.compute_velocity(v_target, self.robot.v, self.dt)
 
-        return v_cmd, omega
+        # ── 安全层: 渐进降速, 拿到预期实际速度 ──
+        expected_v = v_cmd
+        if self.world is not None and v_cmd > 0.0:
+            expected_v = self._find_safe_speed(v_cmd, self.robot.omega)  # 用当前 ω 估计
+
+        # ── 再用预期速度算 ω: MPC 现在知道真实速度, 预测才准 ──
+        omega = self.mpc.compute_omega(self.robot, self.current_path, expected_v)
+
+        return expected_v, omega
 
     # ─── Unified mode control loop ────────────────────────────────
 
@@ -526,6 +531,7 @@ class ControlNode(Node):
 
         if self._backing_up and self._backup_steps > 0:
             v_cmd = -0.5
+            omega = 1.2  # 倒车时转, 帮助脱离
             self._backup_steps -= 1
         elif self._backing_up:
             self._backing_up = False
@@ -557,14 +563,20 @@ class ControlNode(Node):
         else:
             v_cmd, omega = self._control_unified()
 
-        if self.world is not None and v_cmd > 0.0:
-            if self._command_will_collide(v_cmd, omega):
-                v_cmd = 0.0
-                if abs(omega) < 0.4:
-                    omega = 0.8
-                self._safety_stop_steps += 1
+        # ── Stall detection: 长时间无法前进 → 倒车脱离 ──
+        if self.mode == "unified" and self.current_path and not self._backing_up:
+            goal = self.current_path[-1]
+            d_goal = math.sqrt((self.robot.x-goal[0])**2 + (self.robot.y-goal[1])**2)
+            # 有路径、离目标远、速度近零持续 50 帧 → 卡死了
+            if d_goal > 0.5 and abs(self.robot.v) < 0.05 and abs(self.robot.omega) < 0.05:
+                self._stuck_steps += 1
             else:
-                self._safety_stop_steps = 0
+                self._stuck_steps = 0
+            if self._stuck_steps > 50:
+                log_warn("  ⚠ unified 卡住, 倒车脱离!")
+                self._backing_up = True
+                self._backup_steps = 40
+                self._stuck_steps = 0
 
         self.robot.set_velocity(v_cmd, omega)
         self.robot.update(self.dt)
@@ -578,13 +590,23 @@ class ControlNode(Node):
             )
             self.track_error_history.append(min_dist)
 
-    def _command_will_collide(self, v_cmd: float, omega: float):
-        """短时预测最终 (v,omega) 指令是否会撞障碍物."""
+    def _find_safe_speed(self, v_cmd: float, omega: float) -> float:
+        """渐进降速: 从 v_cmd 开始, 逐步降低直到预测无碰撞. 返回安全速度."""
+        for frac in [1.0, 0.75, 0.5, 0.3, 0.1, 0.0]:
+            trial_v = v_cmd * frac
+            if trial_v < 0.03:
+                return 0.0
+            if not self._predict_collision(trial_v, omega):
+                return trial_v
+        return 0.0
+
+    def _predict_collision(self, v: float, omega: float) -> bool:
+        """短时预测 (v,omega) 是否会在 6 步 (0.12s) 内碰撞."""
         x, y, theta = self.robot.x, self.robot.y, self.robot.theta
         for _ in range(6):
             theta_mid = theta + omega * self.dt * 0.5
-            x += v_cmd * math.cos(theta_mid) * self.dt
-            y += v_cmd * math.sin(theta_mid) * self.dt
+            x += v * math.cos(theta_mid) * self.dt
+            y += v * math.sin(theta_mid) * self.dt
             theta += omega * self.dt
             if self.world.is_collision(x, y, 0.22):
                 return True

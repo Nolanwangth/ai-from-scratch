@@ -191,15 +191,15 @@ def demo_run_navigation(control_mode="split", use_viz=False, dynamic_obstacle=Fa
         viz.update_slam_map(slam._grid)
 
     # ── 初算路径: mock 不回溯历史消息, 初始化时手动给 planner pose+costmap ──
-    drx, dry, _ = slam._drifted_pose
-    planner.current_pose = (drx, dry)
+    # 用机器人真实位置做 A* 起点, 避免 SLAM 漂移把路径起点和机器人位置撕开
+    planner.current_pose = (robot.x, robot.y)
     planner.latest_costmap = costmap.costmap  # mock时序问题
     planner.set_goal(goal_x, goal_y)
     plan = planner.plan()
     if plan:
         controller.set_path(plan)  # mock时序: controller 订阅时 plan 还没发
     if plan and not use_viz:
-        log_ok(f"  初始路径: {len(plan)} 个航点 (A*) 起点=({drx:.1f},{dry:.1f})")
+        log_ok(f"  初始路径: {len(plan)} 个航点 (A*) 起点=({robot.x:.1f},{robot.y:.1f})")
 
     # ── 主控制循环 (50Hz) ──
     max_steps = 2000
@@ -208,20 +208,26 @@ def demo_run_navigation(control_mode="split", use_viz=False, dynamic_obstacle=Fa
     min_clearance = float("inf")
     n_collision_frames = 0
 
+    # 动态障碍物: box_placed 必须在循环外初始化
+    box_placed = False
+
     for step in range(max_steps):
         # 感知: 发布 /odom on topic → SLAM 订阅
         if step % 2 == 0:
             perception._sensor_callback()
 
-        # 动态障碍物: 放到很后面, 避免基础导航验证被强行打断.
-        # 如果车已经接近目标, 就不再注入, 让 --run 稳定验证“能到达”.
+        # 动态障碍物: 在导航中段突然出现, 测试 BT 重规划能力.
+        # 触发条件: 机器人已前进足够距离 (>4m 路程), 还在路途中 (>3m to goal)
+        dist_traveled = math.sqrt((robot.x - 1.0)**2 + (robot.y - 1.0)**2)
         dist_for_dynamic = math.sqrt((robot.x - goal_x)**2 + (robot.y - goal_y)**2)
-        if dynamic_obstacle and step == 1600 and dist_for_dynamic > 2.0:
+        if not box_placed and dist_traveled > 4.0 and dist_for_dynamic > 3.0:
             from ros2_nav_course.simulation.world_2d import Obstacle
-            idx = min(len(plan) * 2 // 3, len(plan) - 1) if plan else 0
-            bx, by = plan[idx] if plan else (5.0, 5.0)
-            if math.sqrt((bx-robot.x)**2 + (by-robot.y)**2) < 1.5:
-                bx, by = robot.x + 2.0, robot.y + 2.0
+            # 把箱子放在机器人前方 2m (当前朝向), 模拟"突然出现的障碍物"
+            bx = robot.x + 2.0 * math.cos(robot.theta)
+            by = robot.y + 2.0 * math.sin(robot.theta)
+            # 夹到房间内
+            bx = max(0.5, min(9.5, bx))
+            by = max(0.5, min(9.5, by))
             world.obstacles.append(Obstacle(bx, by, 0.6, 0.6, "BOX!"))
             slam._tick()
             costmap._inflate_and_publish()
@@ -229,6 +235,7 @@ def demo_run_navigation(control_mode="split", use_viz=False, dynamic_obstacle=Fa
                 viz.update_costmap(costmap.costmap)
                 viz.refresh_obstacles()
             log_warn(f"  ⚡ 动态障碍物出现在 ({bx:.1f}, {by:.1f})!")
+            box_placed = True
             plan = None
             decision.context["path_blocked"] = True
 
@@ -248,7 +255,7 @@ def demo_run_navigation(control_mode="split", use_viz=False, dynamic_obstacle=Fa
             else:
                 decision.context["recovery_count"] = 0
 
-            planner.current_pose = (slam._drifted_pose[0], slam._drifted_pose[1])
+            planner.current_pose = (robot.x, robot.y)
             new_plan = planner.plan(verbose=was_blocked)  # 发布 /plan → controller._plan_cb
             if new_plan:
                 plan = new_plan
