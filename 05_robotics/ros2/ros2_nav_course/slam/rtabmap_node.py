@@ -246,49 +246,48 @@ class RTABMapNode(Node):
             new_kf.weight *= 1.2
 
     def _tick(self):
-        """定时发布地图 — 增量建图 + 漂移位姿广播."""
-        # 用 SLAM 估计位姿 (带漂移) 而不是真实位姿建图
+        """增量建图: 真值位姿测量 + 估计位姿插图 (物理正确的 SLAM 模拟)."""
+        # 真值位姿产生传感器测量 (物理: 传感器看到的世界是真实世界)
+        tx, ty, ttheta = self._true_pose
+        # 估计位姿把测量插入地图 (SLAM: 我不知道自己在哪, 往漂移位姿写)
         rx, ry, rtheta = self._drifted_pose
 
-        # 模拟 D435 深度扫描: 从估计位置射出射线
-        # 射线命中障碍物 → 到达前标记自由(0), 命中点标记占据(100)
-        # 射线未命中 → 到达 max_range 全标记自由(0)
         angles = np.linspace(-self.d435_fov_deg/2, self.d435_fov_deg/2, self.d435_rays)
         for a_deg in angles:
-            a_rad = rtheta + math.radians(a_deg)
-            dx = math.cos(a_rad)
-            dy = math.sin(a_rad)
-            # 射线步进 (每 resolution 一步)
+            # ── 从真值位姿发射射线, 测量真实深度 ──
+            true_a = ttheta + math.radians(a_deg)
+            tdx, tdy = math.cos(true_a), math.sin(true_a)
             step = self.resolution
-            hit_dist = self.d435_max_range  # 默认没命中
+            hit_dist = self.d435_max_range
             hit = False
             for s in np.arange(step, self.d435_max_range + step, step):
-                wx = rx + s * dx
-                wy = ry + s * dy
-                gx = int((wx - self.map_ox) / self.resolution)
-                gy = int((wy - self.map_oy) / self.resolution)
-                if not (0 <= gx < self.map_W and 0 <= gy < self.map_H):
+                wx = tx + s * tdx
+                wy = ty + s * tdy
+                if not (0 <= wx < self.world.width and 0 <= wy < self.world.height):
                     break
-                # 用世界真值判断这个点是不是障碍物 (模拟 D435 测到了东西)
                 if self.world.is_collision(wx, wy, 0.05):
                     hit_dist = s + random.gauss(0, self._depth_noise_std)
                     hit = True
                     break
-            # 标记射线经过的格子
-            hit_gx = int((rx + hit_dist * dx - self.map_ox) / self.resolution)
-            hit_gy = int((ry + hit_dist * dy - self.map_oy) / self.resolution)
+
+            # ── 把测量插入地图时, 使用估计位姿 (漂移后) ──
+            est_a = rtheta + math.radians(a_deg)
+            edx, edy = math.cos(est_a), math.sin(est_a)
+
+            # 射线经过的格子标记自由 (基于估计位姿)
             for s in np.arange(step, hit_dist, step):
-                wx = rx + s * dx
-                wy = ry + s * dy
-                gx = int((wx - self.map_ox) / self.resolution)
-                gy = int((wy - self.map_oy) / self.resolution)
+                gx = int((rx + s*edx - self.map_ox) / self.resolution)
+                gy = int((ry + s*edy - self.map_oy) / self.resolution)
                 if 0 <= gx < self.map_W and 0 <= gy < self.map_H:
-                    # 之前未知 → 标记自由; 已标过的保持
                     if self._grid[gy, gx] == -1:
-                        self._grid[gy, gx] = 0  # 自由空间
-            # 命中点: 标记占据 (带小概率误报)
-            if hit and 0 <= hit_gx < self.map_W and 0 <= hit_gy < self.map_H:
-                self._grid[hit_gy, hit_gx] = 0 if random.random() < self._obs_noise_prob else 100
+                        self._grid[gy, gx] = 0  # 自由
+
+            # 命中点标记占据 (基于估计位姿)
+            if hit:
+                hit_gx = int((rx + hit_dist*edx - self.map_ox) / self.resolution)
+                hit_gy = int((ry + hit_dist*edy - self.map_oy) / self.resolution)
+                if 0 <= hit_gx < self.map_W and 0 <= hit_gy < self.map_H:
+                    self._grid[hit_gy, hit_gx] = 0 if random.random() < self._obs_noise_prob else 100
 
         # 发布当前部分地图
         og = OccupancyGrid(

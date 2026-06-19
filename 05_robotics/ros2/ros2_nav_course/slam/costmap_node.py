@@ -56,7 +56,7 @@ class CostmapNode(Node):
         self.latest_map = og
 
     def _inflate_and_publish(self):
-        """膨胀算法: 给每个占据格子周围画圈"""
+        """膨胀算法: 只对占据格子膨胀, 不污染未知/自由."""
         if self.latest_map is None:
             return
 
@@ -64,33 +64,26 @@ class CostmapNode(Node):
             self.latest_map.height, self.latest_map.width
         ).astype(np.float32)
 
-        # 找到所有占据格子
         H, W = raw.shape
-        occupied = (raw >= 50)  # 占据或膨胀
-
-        # 距离变换的简化: 重复膨胀几次
-        # 真实 costmap_2d 用更高效的距离变换
-        # 这里教学用: 对每个占据格子在周围 inflation_radius 内标记
-        inflated = raw.copy()
-
-        # 膨胀像素数
         inflate_px = int(self.inflation_radius / self.latest_map.resolution)
 
-        # 用卷积膨胀 (简单版距离变换)
+        # 只膨胀占据格子, 分 mask 处理避免 unknown 被稀释
+        occ_mask = (raw >= 100).astype(np.float32)  # 只有障碍物本体
+
         from scipy import ndimage
-        kernel_size = inflate_px * 2 + 1
         y, x = np.ogrid[-inflate_px:inflate_px+1, -inflate_px:inflate_px+1]
         kernel = (x*x + y*y <= inflate_px*inflate_px).astype(np.float32)
+        dilated = ndimage.maximum_filter(occ_mask, footprint=kernel)
 
-        dilated = ndimage.maximum_filter(raw.astype(np.float32),
-                                         footprint=kernel)
-
-        # costmap: 0=自由, 80=未知(可过但代价高), 50=膨胀区, 254=致命
-        # 未知区域代价高让 A* 尽量走已知区域, 但不完全阻断探索
-        costmap = np.full_like(dilated, 80, dtype=np.int16)   # 默认=未知=高代价可过
-        costmap[dilated == 0] = 0           # 自由空间
-        costmap[(dilated > 0) & (dilated < 100)] = 50   # 膨胀区
-        costmap[dilated >= 100] = 254        # 致命区 (障碍物)
+        # 分层构建 costmap:
+        #   默认=未知(80, 高代价可过)
+        #   raw==0 且不在膨胀区内 → 自由(0)
+        #   膨胀区内且 raw!=100 → 膨胀区(50)
+        #   raw>=100 → 致命(254)
+        costmap = np.full((H, W), 80, dtype=np.int16)
+        costmap[(raw == 0) & (dilated == 0)] = 0      # 自由
+        costmap[(dilated > 0) & (raw < 100)] = 50      # 膨胀区
+        costmap[raw >= 100] = 254                       # 致命
         costmap_out = costmap
 
         self.costmap = OccupancyGrid(

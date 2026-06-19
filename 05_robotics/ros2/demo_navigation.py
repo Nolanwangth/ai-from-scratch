@@ -182,9 +182,11 @@ def demo_run_navigation(control_mode="split", use_viz=False):
     costmap._inflate_and_publish()
     if controller.unified_mpc and controller.unified_mpc.cm_data is None:
         controller.unified_mpc.set_costmap(costmap.costmap)
+    # 初始 SLAM 地图推给可视化 (显示扫描后的扇形覆盖)
+    if viz:
+        viz.update_slam_map(slam._grid)
 
     # ── 初算路径: planner 通过 /pose_corrected 获 SLAM 估计位姿 (不是 true robot pose) ──
-    # NOTE: SLAM 已发布 /pose_corrected → planner._pose_callback 已设置 current_pose
     planner.set_goal(goal_x, goal_y)
     plan = planner.plan()
     if plan and not use_viz:
@@ -254,6 +256,9 @@ def demo_run_navigation(control_mode="split", use_viz=False):
         if viz and step % 8 == 0:
             if costmap.costmap is not None:
                 viz.update_costmap(costmap.costmap)
+            # SLAM 建图过程: 把原始栅格发给可视化, 显示逐步 reveal 效果
+            if slam._grid is not None:
+                viz.update_slam_map(slam._grid)
             kf_list = [(kf.x, kf.y) for kf in slam.wm.values()]
             kf_list += [(kf.x, kf.y) for kf in slam.stm]
             viz.draw(robot.x, robot.y, robot.theta, robot.v, robot.omega,

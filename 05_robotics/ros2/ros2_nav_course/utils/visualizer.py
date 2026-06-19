@@ -39,6 +39,8 @@ class NavigationVisualizer:
         self._depth_frame = 0
         self._pending_costmap = None
         self._frame_count = 0
+        self._slam_map_img = None       # raw SLAM grid overlay (unknown/free/occupied)
+        self._slam_map_data = None      # (data, H, W, ox, oy, res)
 
         self._build_map_view()
         self._build_info_panel()
@@ -172,6 +174,15 @@ class NavigationVisualizer:
     def update_costmap(self, costmap_data):
         self._pending_costmap = costmap_data
 
+    def update_slam_map(self, grid_2d):
+        """接收 SLAM 原始栅格 (numpy 2D, -1=未知, 0=自由, 100=占据)."""
+        if grid_2d is None:
+            return
+        H, W = grid_2d.shape
+        res = 0.05
+        ox, oy = 0.0, 0.0
+        self._slam_map_data = (np.array(grid_2d, dtype=np.int16), H, W, ox, oy, res)
+
     def draw(self, robot_x, robot_y, robot_theta,
              robot_v, robot_omega, path=None, kfs=None,
              n_loops=0, wm_size=0, goal=None, step=0):
@@ -205,6 +216,10 @@ class NavigationVisualizer:
         elif kfs is not None:
             self.kf_scatter.set_offsets(np.empty((0, 2)))
 
+        # Raw SLAM map overlay (unknown grey, free clear, occupied dark)
+        if self._slam_map_data is not None and self._frame_count % 3 == 0:
+            self._draw_slam_map()
+
         # Costmap (heavy — only at ~1Hz)
         if self._pending_costmap is not None and self._frame_count % 6 == 0:
             self._draw_costmap(self._pending_costmap)
@@ -236,6 +251,29 @@ class NavigationVisualizer:
             self.fig.canvas.flush_events()
         except Exception:
             pass  # window closed
+
+    def _draw_slam_map(self):
+        """渲染 SLAM 原始栅格: 深灰=未知, 透明=自由, 黑色=占据."""
+        if self._slam_map_data is None:
+            return
+        if self._slam_map_img is not None:
+            try: self._slam_map_img.remove()
+            except Exception: pass
+        data, H, W, ox, oy, res = self._slam_map_data
+        rgba = np.zeros((H, W, 4), dtype=np.float32)
+        unknown = data == -1
+        occupied = data >= 100
+        free = data == 0
+        # 未知: 深灰, 半透明
+        rgba[unknown, 0:3] = 0.4; rgba[unknown, 3] = 0.6
+        # 占据: 黑色, 40% 透明
+        rgba[occupied, 0:3] = 0.1; rgba[occupied, 3] = 0.4
+        # 自由: 透明 (留白)
+        rgba[free, 3] = 0.0
+        extent = [ox, ox + W * res, oy, oy + H * res]
+        self._slam_map_img = self.ax_map.imshow(
+            rgba, extent=extent, origin='lower',
+            interpolation='nearest', zorder=0, aspect='auto')
 
     def _draw_costmap(self, costmap_data):
         if costmap_data is None:
