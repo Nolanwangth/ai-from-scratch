@@ -131,7 +131,7 @@ def demo_explain_architecture():
     """)
 
 
-def demo_run_navigation(control_mode="split", use_viz=False):
+def demo_run_navigation(control_mode="split", use_viz=False, dynamic_obstacle=False):
     """跑完整导航。use_viz=True 弹出 matplotlib 三面板可视化窗口。"""
     print_banner()
 
@@ -205,14 +205,18 @@ def demo_run_navigation(control_mode="split", use_viz=False):
     max_steps = 2000
     reached = False
     bt_triggered = False
+    min_clearance = float("inf")
+    n_collision_frames = 0
 
     for step in range(max_steps):
         # 感知: 发布 /odom on topic → SLAM 订阅
         if step % 2 == 0:
             perception._sensor_callback()
 
-        # 动态障碍物: 后半程再注入, 避免增量地图刚起步就被强行堵死
-        if step == 1200:
+        # 动态障碍物: 放到很后面, 避免基础导航验证被强行打断.
+        # 如果车已经接近目标, 就不再注入, 让 --run 稳定验证“能到达”.
+        dist_for_dynamic = math.sqrt((robot.x - goal_x)**2 + (robot.y - goal_y)**2)
+        if dynamic_obstacle and step == 1600 and dist_for_dynamic > 2.0:
             from ros2_nav_course.simulation.world_2d import Obstacle
             idx = min(len(plan) * 2 // 3, len(plan) - 1) if plan else 0
             bx, by = plan[idx] if plan else (5.0, 5.0)
@@ -234,8 +238,9 @@ def demo_run_navigation(control_mode="split", use_viz=False):
             costmap._inflate_and_publish()
             # costmap 发布 /costmap → planner+controller 通过订阅自动获取
 
-        # 重规划: path_blocked 时立即, 否则每 2 秒维护
-        if plan is None or step % 100 == 0:
+        # 重规划: 没路径时低频重试, 正常时每 2 秒维护一次.
+        should_plan = (plan is None and step % 25 == 0) or (plan is not None and step % 100 == 0)
+        if should_plan:
             was_blocked = decision.context.get("path_blocked", False)
             if was_blocked:
                 decision.bt_root.tick(decision.context)
@@ -255,11 +260,13 @@ def demo_run_navigation(control_mode="split", use_viz=False):
 
         controller._control_loop()
 
-        # 控制层触发紧急重规划 (障碍物太近)
-        if controller._needs_replan:
-            controller._needs_replan = False
-            decision.context["path_blocked"] = True
-            plan = None
+        clearance = min(
+            obs.distance_to(robot.x, robot.y)
+            for obs in world.obstacles + world.walls
+        )
+        min_clearance = min(min_clearance, clearance)
+        if world.is_collision(robot.x, robot.y, 0.20):
+            n_collision_frames += 1
 
         # 可视化渲染 (~6Hz)
         if viz and step % 8 == 0:
@@ -297,6 +304,8 @@ def demo_run_navigation(control_mode="split", use_viz=False):
         print(f"  到达目标:        {'✅ 是' if reached else '❌ 否'}")
         print(f"  最终距离:        {dist_to_goal:.2f}m")
         print(f"  最终位置:        ({robot.x:.2f}, {robot.y:.2f}, {robot.theta:.2f}rad)")
+        print(f"  最小障碍距离:    {min_clearance:.2f}m")
+        print(f"  碰撞帧数:        {n_collision_frames}")
         print(f"  SLAM:           {slam.memory_summary()}")
         if planner.latest_path:
             print(f"  A* 路径:         {len(planner.latest_path)} 航点")
@@ -312,7 +321,7 @@ def demo_run_navigation(control_mode="split", use_viz=False):
         print(f"  Decision:       ✅  BT: {decision.state}")
         print(f"  Planner:        ✅  A* → /plan")
         print(f"  Controller:     ✅  {control_mode} → /cmd_vel")
-        if bt_triggered:
+        if reached and bt_triggered:
             print(f"\n  🎯 BT 触发: 路径被堵 → 重规划 → 绕行成功")
 
     return reached
@@ -334,13 +343,14 @@ if __name__ == "__main__":
                 f"--mode must be 'split' or 'unified', got '{control_mode}'"
 
     if len(args) == 0 or "--help" in args:
-        print("Usage: conda activate ros2_nav && python demo_navigation.py [--map|--explain|--run|--viz] [--mode=split|unified]")
+        print("Usage: conda activate ros2_nav && python demo_navigation.py [--map|--explain|--run|--viz] [--mode=split|unified] [--dynamic]")
         print("  --map         Static map (room layout)")
         print("  --explain     ROS2 dataflow + algorithm overview")
         print("  --run         Run navigation (terminal text)")
         print("  --viz         Run navigation (3-panel matplotlib window)")
         print("  --mode=split   Horizontal MPC + Vertical PID     (default, learn PID)")
         print("  --mode=unified Joint MPC samples (v,ω) together  (like Waymo)")
+        print("  --dynamic      Inject a late obstacle to demo BT replanning")
         sys.exit(0)
 
     if "--map" in args:
@@ -351,8 +361,8 @@ if __name__ == "__main__":
 
     if "--viz" in args:
         import numpy as np
-        demo_run_navigation(control_mode, use_viz=True)
+        demo_run_navigation(control_mode, use_viz=True, dynamic_obstacle="--dynamic" in args)
 
     elif "--run" in args:
         import numpy as np
-        demo_run_navigation(control_mode, use_viz=False)
+        demo_run_navigation(control_mode, use_viz=False, dynamic_obstacle="--dynamic" in args)

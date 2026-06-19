@@ -34,6 +34,10 @@ python demo_navigation.py --viz --mode=unified
 # 5. 终端跑
 python demo_navigation.py --run --mode=split
 python demo_navigation.py --run --mode=unified
+
+# 6. 可选: 注入后期动态障碍, 专门看 BT 重规划
+python demo_navigation.py --run --mode=split --dynamic
+python demo_navigation.py --viz --mode=unified --dynamic
 ```
 
 ---
@@ -126,10 +130,10 @@ Decision (BT)
 | 方向盘 | MPC: 41 ω, 预测 10 步 | UnifiedMPC: 126 (v,ω), 预测 6 步 |
 | 油门 | PID: Kp·e + Ki·∫e + Kd·de/dt | 和方向盘同一个代价 |
 | 速度规划 | SpeedProfiler (曲率+目标减速) | 内建在 rollout 代价里 |
-| 碰撞检测 | 控制层近障碍降速 | costmap O(1) 查表 + 近障碍降速 |
+| 碰撞检测 | 横向 MPC 避障 + 最终速度裁剪 | costmap O(1) 查表 + 最终速度裁剪 |
 | 真实类比 | AGV 叉车, 低速机器人 | Waymo / Cruise / Apollo |
 | 优点 | 分层清楚, 好理解 PID/MPC/速度规划 | 速度和转向统一优化, 行为更直接 |
-| 当前跑通步数 | 863 步, 误差 0.29m | 671 步, 误差 0.30m |
+| 当前跑通步数 | 约 1000~1100 步, 碰撞帧数 0 | 约 550~650 步, 碰撞帧数 0 |
 
 ---
 

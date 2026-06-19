@@ -105,9 +105,10 @@ class RTABMapNode(Node):
         self._drift_y = 0.0
         self._drift_theta = 0.0
         self._last_true_pose = (0.0, 0.0, 0.0)
-        # 漂移参数: 每米平移漂移 3%, 每弧度旋转漂移 5%
-        self._drift_trans_ratio = 0.03
-        self._drift_rot_ratio = 0.05
+        # 漂移参数: 教学 demo 保留“误差会累积”的 SLAM 语义,
+        # 但默认值不能大到把规划坐标系和真实机器人坐标系撕开.
+        self._drift_trans_ratio = 0.008
+        self._drift_rot_ratio = 0.015
 
         # ── 增量建图 — 地图随视野逐步 reveal, 不是一次性真值 ──
         self.resolution = resolution

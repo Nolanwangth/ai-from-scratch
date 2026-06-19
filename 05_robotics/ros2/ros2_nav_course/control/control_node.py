@@ -82,7 +82,9 @@ class LateralMPC:
             heading_err = min(heading_err, 2*math.pi - heading_err)
             goal = path[-1]
             d_goal = math.sqrt((x-goal[0])**2 + (y-goal[1])**2)
-            collision = 100.0 if (self.world and self.world.is_collision(x, y, 0.2)) else 0.0
+            if self.world and self.world.is_collision(x, y, 0.24):
+                return 1e6
+            collision = 0.0
             w = 1.0 + step * 0.15
             total += (min_dist*4.0 + heading_err*1.5 + d_goal*0.5 +
                       collision + abs(omega)*0.1) * w
@@ -372,7 +374,7 @@ class ControlNode(Node):
         self.current_path: List[Tuple[float, float]] = []
         self.n_control_steps = 0
         self.track_error_history: List[float] = []
-        self._needs_replan = False
+        self._safety_stop_steps = 0
         self._backing_up = False
         self._backup_steps = 0
 
@@ -544,10 +546,25 @@ class ControlNode(Node):
     def _control_loop(self):
         self.n_control_steps += 1
 
+        if not self.current_path:
+            self.robot.set_velocity(0.0, 0.0)
+            self.robot.update(self.dt)
+            self.publish("/cmd_vel", Twist(linear_x=0.0, angular_z=0.0))
+            return
+
         if self.mode == "split":
             v_cmd, omega = self._control_split()
         else:
             v_cmd, omega = self._control_unified()
+
+        if self.world is not None and v_cmd > 0.0:
+            if self._command_will_collide(v_cmd, omega):
+                v_cmd = 0.0
+                if abs(omega) < 0.4:
+                    omega = 0.8
+                self._safety_stop_steps += 1
+            else:
+                self._safety_stop_steps = 0
 
         self.robot.set_velocity(v_cmd, omega)
         self.robot.update(self.dt)
@@ -560,6 +577,18 @@ class ControlNode(Node):
                 for px, py in self.current_path
             )
             self.track_error_history.append(min_dist)
+
+    def _command_will_collide(self, v_cmd: float, omega: float):
+        """短时预测最终 (v,omega) 指令是否会撞障碍物."""
+        x, y, theta = self.robot.x, self.robot.y, self.robot.theta
+        for _ in range(6):
+            theta_mid = theta + omega * self.dt * 0.5
+            x += v_cmd * math.cos(theta_mid) * self.dt
+            y += v_cmd * math.sin(theta_mid) * self.dt
+            theta += omega * self.dt
+            if self.world.is_collision(x, y, 0.22):
+                return True
+        return False
 
 
 # =============================================================================

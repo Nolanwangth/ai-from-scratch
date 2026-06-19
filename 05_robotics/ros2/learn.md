@@ -321,6 +321,9 @@ workstation → kitchen / toolbox
 ```bash
 python demo_navigation.py --run --mode=split
 python demo_navigation.py --run --mode=unified
+
+# 单独看动态障碍 + BT 重规划时再加这个
+python demo_navigation.py --run --mode=split --dynamic
 ```
 
 看：
@@ -335,8 +338,8 @@ python demo_navigation.py --run --mode=unified
 当前正常结果应该接近：
 
 ```text
-split:   800~900 步左右到达
-unified: 600~700 步左右到达
+split:   1000~1100 步左右到达, 碰撞帧数 0
+unified: 550~650 步左右到达, 碰撞帧数 0
 ```
 
 这个实验的目的：
