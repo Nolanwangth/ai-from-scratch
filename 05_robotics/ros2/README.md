@@ -13,7 +13,7 @@
 ```bash
 # 激活你的 ros2_nav 环境
 conda activate ros2_nav
-cd ai-from-scratch/05_robotics/ros2
+cd /Users/nolan/Desktop/agi/ai-from-scratch/05_robotics/ros2
 ```
 
 ## 玩耍指令
@@ -87,7 +87,7 @@ Decision (BT)
     Topic:  /goal_point → Planner
     Topic:  /decision_state → 监控
 
-全部通过 Topic/Service/Action 通信, 无后门赋值。
+核心模块通过 Topic/Service/Action 通信。`demo_navigation.py` 里为了 mock 时序稳定, 初始化阶段会手动同步一次 planner/controller 状态。
 ```
 
 ---
@@ -108,7 +108,7 @@ Decision (BT)
   代价地图:
     未知区域 (gray)  → cost=80   (高代价, 让 A* 尽量走已知)
     自由空间 (clear) → cost=0
-    膨胀区  (orange) → cost=50
+    膨胀区  (orange) → cost=120  (可过, 但强烈避开)
     致命区  (red)    → cost=254
 
   --viz 里能看到:
@@ -123,13 +123,13 @@ Decision (BT)
 
 | | Split (--mode=split) | Unified (--mode=unified) |
 |---|---|---|
-| 方向盘 | MPC: 41 ω, 预测 10 步 | UnifiedMPC: ~87 (v,ω), 预测 8 步 |
+| 方向盘 | MPC: 41 ω, 预测 10 步 | UnifiedMPC: 126 (v,ω), 预测 6 步 |
 | 油门 | PID: Kp·e + Ki·∫e + Kd·de/dt | 和方向盘同一个代价 |
-| 速度规划 | SpeedProfiler (曲率+目标+障碍物) | 内建在 rollout 代价里 |
-| 碰撞检测 | costmap O(1) 查表 | costmap O(1) 查表 |
+| 速度规划 | SpeedProfiler (曲率+目标减速) | 内建在 rollout 代价里 |
+| 碰撞检测 | 控制层近障碍降速 | costmap O(1) 查表 + 近障碍降速 |
 | 真实类比 | AGV 叉车, 低速机器人 | Waymo / Cruise / Apollo |
-| 漂移下表现 | 较差 — 三层模块各自用不同的"我在哪" | 较好 — 一个人从真实位置重评估 |
-| 跑通步数 | ~1991 | ~1295 |
+| 优点 | 分层清楚, 好理解 PID/MPC/速度规划 | 速度和转向统一优化, 行为更直接 |
+| 当前跑通步数 | 863 步, 误差 0.29m | 671 步, 误差 0.30m |
 
 ---
 
@@ -138,9 +138,10 @@ Decision (BT)
 | 层 | 什么时候 | 做什么 |
 |---|---|---|
 | A* | 算路径时 | costmap ≥254 → 不可通行 |
-| SpeedProfiler | A* 重算时 | 路径靠近障碍物 → 降限速 |
-| 控制层 (50Hz) | 每帧 | robot < 0.5m 障碍物 → 减速 |
-| 控制层 (50Hz) | 每帧 | robot < 0.35m → 倒车 + BT 重规划 |
+| Costmap | SLAM 更新后 | 障碍物膨胀成高代价区 |
+| SpeedProfiler | split 模式 | 弯道/目标附近降速 |
+| 控制层 (50Hz) | 每帧 | robot < 0.2m 障碍物 → 降速 |
+| BT / A* | 周期或动态障碍 | 触发重规划 |
 
 ---
 
@@ -209,8 +210,8 @@ python ros2_nav_course/control/control_node.py --mode=unified
 
 ```
 起点: 充电桩 (1.0, 1.0) → 目标: 工位 (8.0, 8.0)
-SLAM: 5m D435 FOV 逐步扫描, 3% 平移漂移 + 5% 旋转漂移
-A*: 210 航点绕开桌子和柜子
-BOX 掉落 → BT 恢复 → A* 绕行
-unified: 1295 步到工位 (误差 0.29m)
+SLAM: 10m D435 FOV 逐步扫描, 3% 平移漂移 + 5% 旋转漂移
+A*: 基于增量地图和 costmap 低频重规划
+split:   863 步到工位 (误差 0.29m)
+unified: 671 步到工位 (误差 0.30m)
 ```

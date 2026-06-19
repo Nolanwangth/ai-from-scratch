@@ -78,11 +78,11 @@ class CostmapNode(Node):
         # 分层构建 costmap:
         #   默认=未知(80, 高代价可过)
         #   raw==0 且不在膨胀区内 → 自由(0)
-        #   膨胀区内且 raw!=100 → 膨胀区(50)
+        #   膨胀区内且 raw!=100 → 膨胀区(120, 可过但强烈避开)
         #   raw>=100 → 致命(254)
         costmap = np.full((H, W), 80, dtype=np.int16)
         costmap[(raw == 0) & (dilated == 0)] = 0      # 自由
-        costmap[(dilated > 0) & (raw < 100)] = 50      # 膨胀区
+        costmap[(dilated > 0) & (raw < 100)] = 120     # 膨胀区
         costmap[raw >= 100] = 254                       # 致命
         costmap_out = costmap
 

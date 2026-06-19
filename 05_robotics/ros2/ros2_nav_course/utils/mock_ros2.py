@@ -132,9 +132,15 @@ class TopicManager:
 
     @classmethod
     def subscribe(cls, name: str, callback: Callable, msg_type: str = "any"):
-        """订阅一个话题"""
+        """订阅一个话题 — 新订阅者能收到最后一条历史消息 (ROS2 transient local QoS)."""
         topic = cls.advertise(name, msg_type)
         topic._subscribers.append(callback)
+        # replay: 如果已有消息, 立即发给新订阅者 (修复 mock 时序问题)
+        if topic.msg is not None:
+            try:
+                callback(topic.msg)
+            except Exception as e:
+                print(f"  [Topic:{name}] replay 错误: {e}")
 
     @classmethod
     def get_topic(cls, name: str) -> Optional[Topic]:

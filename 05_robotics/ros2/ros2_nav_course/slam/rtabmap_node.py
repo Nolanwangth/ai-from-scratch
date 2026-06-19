@@ -119,8 +119,8 @@ class RTABMapNode(Node):
         self._grid = np.full((self.map_H, self.map_W), -1, dtype=np.int8)
         # D435 模拟参数
         self.d435_fov_deg = 87.0        # D435 水平视场角
-        self.d435_max_range = 5.0       # 最大有效深度 (m)
-        self.d435_rays = 120            # 每帧射线数
+        self.d435_max_range = 10.0      # 教学仿真里覆盖 10m 房间
+        self.d435_rays = 180            # 每帧射线数
         self._depth_noise_std = 0.03    # 深度噪声标准差 (m)
         self._obs_noise_prob = 0.02     # 2% 概率把自由格子误报为占据
 

@@ -105,7 +105,7 @@ class SpeedProfiler:
     """
 
     def __init__(self, max_v=1.0, min_v=0.1, slowdown_dist=2.0,
-                 safe_dist=0.5,  # 离障碍物多远开始减速
+                 safe_dist=0.3,  # 离障碍物多远开始减速
                  back_dist=0.15):  # 离障碍物多近开始倒车 (负速度)
         self.max_v = max_v
         self.min_v = min_v
@@ -129,20 +129,15 @@ class SpeedProfiler:
                 a2 = math.atan2(path[i+2][1]-path[i+1][1], path[i+2][0]-path[i+1][0])
                 da = min(abs(a2-a1), 2*math.pi - abs(a2-a1))
                 if da > 0.05:
-                    v = min(v, max(self.min_v, self.max_v / (1.0 + da * 8.0)))
+                    v = min(v, max(self.min_v, self.max_v / (1.0 + da * 2.0)))
 
             # 2. 目标减速
             dg = math.sqrt((px-goal[0])**2 + (py-goal[1])**2)
             if dg < self.slowdown_dist:
                 v = min(v, self.min_v + (self.max_v-self.min_v)*dg/self.slowdown_dist)
 
-            # 3. 障碍物距离 — 离阴影越近越慢, 太近就倒车
-            if self.world is not None:
-                dist_to_obs = self._min_obstacle_distance(px, py)
-                if dist_to_obs < self.safe_dist:
-                    # 线性降速: safe_dist 处 v=max_v, back_dist 处 v=-0.2 (倒车)
-                    ratio = dist_to_obs / self.safe_dist
-                    v = min(v, -0.3 + 1.3 * ratio)  # 0.15m→-0.3m/s, 0.5m→1.0m/s
+            # 3. 障碍物实时减速交给控制层安全兜底.
+            # SpeedProfiler 只做路径几何速度规划, 避免整条路线被未知/近障碍压得过慢.
 
             limits.append(v)
         return limits
@@ -261,8 +256,8 @@ class UnifiedMPC:
         best_v, best_omega = 0.0, 0.0
         best_cost = float('inf')
 
-        # v 候选: 正向 7 个 + 倒车 1 个 (-0.3m/s), 不含 0 (避免 MPC 选停)
-        v_candidates = list(np.linspace(0.1, self.max_v, self.n_v)) + [-0.3]
+        # v 候选: 正向速度保持足够下限, 避免 MPC 选择“贴路径但爬行”.
+        v_candidates = list(np.linspace(0.35, self.max_v, self.n_v)) + [-0.2]
         # ω 候选: 从 -max_omega 到 +max_omega
         omega_candidates = np.linspace(-self.max_omega, self.max_omega,
                                         self.n_omega * 2 + 1)
@@ -274,7 +269,7 @@ class UnifiedMPC:
                     best_cost, best_v, best_omega = cost, v, omega
 
         # Smooth both v and ω
-        alpha = 0.3
+        alpha = 0.55
         self.current_v = alpha * best_v + (1 - alpha) * self.current_v
         self.current_omega = alpha * best_omega + (1 - alpha) * self.current_omega
         return self.current_v, self.current_omega
@@ -300,7 +295,9 @@ class UnifiedMPC:
             heading_err = abs(theta - path_dir)
             heading_err = min(heading_err, 2*math.pi - heading_err)
 
-            # 目标距离
+            goal = path[-1]
+            d_goal = math.sqrt((x-goal[0])**2 + (y-goal[1])**2)
+
             # 碰撞检测: costmap 网格 O(1) 查表, 若不可用则回退到 world
             cost = 0
             near_obs = False
@@ -316,27 +313,29 @@ class UnifiedMPC:
                     cost = 254
                 elif self.world.is_collision(x, y, 0.40):
                     cost = 50
-            if cost >= 200:
-                collision = 500.0       # 致命区, 直接炸
-            elif cost >= 50:
-                collision = cost * 0.5  # 阴影区: 代价和阴影深度成正比 (50→25, 100→50)
+            if cost >= 254:
+                collision = 500.0       # 致命区 (障碍物本体)
+            elif cost >= 100:
+                collision = cost * 0.3  # 膨胀区 (50→15, ~N/A for cost costmap)
+                near_obs = True
+            elif cost == 50:
+                collision = cost * 0.3  # 膨胀区
                 near_obs = True
             else:
-                collision = 0.0
+                collision = 0.0         # 自由(0) / 未知(80) 不罚, 只管走
 
             # 速度惩罚
             overspeed = max(0.0, v - 1.0)  # 超速 = v > 1.0m/s
-            if near_obs and cost >= 100:
-                # 深阴影区 (距障碍 ≤0.3m): 强制慢速
+            if near_obs:
+                # 膨胀区或致命区附近: 强制慢速
                 overspeed = max(overspeed, v - 0.3)
-            # 浅阴影区 (cost<100, 距障碍 >0.3m): 不罚速, 让车正常通过
 
             w = 1.0  # flat weight, 不放大远期误差
-            total += (min_dist*2.0 + collision + overspeed*2.0) * w
+            total += (min_dist*2.0 + d_goal*0.8 + collision + overspeed*2.0) * w
 
         # 加速度平滑 (弱, 不让 v=0 永远赢)
-        # 前进奖励: v 越大越优, 平滑靠 rollout 终点判断
-        total -= v * 0.5
+        # 前进奖励: v 越大越优, 但倒车只有在避障代价需要时才会赢.
+        total -= v * 14.0
         return total
 
 
@@ -429,7 +428,7 @@ class ControlNode(Node):
         self.robot.max_v = self.get_parameter("max_v") or self.robot.max_v
 
     def _init_split_mode(self):
-        self.speed_profiler = SpeedProfiler(max_v=self.robot.max_v, min_v=0.1)
+        self.speed_profiler = SpeedProfiler(max_v=self.robot.max_v, min_v=0.3)
         self.speed_profiler.world = self.world  # 障碍物距离感知
         self.mpc = LateralMPC(
             predict_steps=10, dt=self.dt,
@@ -443,23 +442,31 @@ class ControlNode(Node):
         log_info("  [split] MPC(steering) + SpeedProfiler + PID(throttle) + emergency-stop")
 
     def _init_unified_mode(self):
-        # 候选数对齐 split: 7v × 10ω = 70 候选 × 8步 = 560次, 接近 split 的 410次
-        n_v = 7  # 实际 v 候选: 0 + 7个正向 + (-0.3) = 9个
-        n_omega = 15  # 2×15+1=31个ω候选, 细粒度转向
+        # 教学仿真优先保证交互速度: 6v × 21ω × 6步, 仍保留统一优化思想.
+        n_v = 5
+        n_omega = 10
         self.unified_mpc = UnifiedMPC(
-            predict_steps=8, dt=0.1,  # 8步×0.1s=0.8s 预测, 让转向有时间生效
+            predict_steps=6, dt=0.12,
             max_v=self.robot.max_v, max_omega=self.robot.max_omega,
             n_v=n_v, n_omega=n_omega, world=self.world
         )
         log_info("  [unified] UnifiedMPC: one cost decides (v, omega) together")
 
     def set_path(self, path: List[Tuple[float, float]]):
-        self.current_path = path
+        # A* 栅格路径很密(通常 5cm 一个点), 控制器用 15cm 级别就够了.
+        # 下采样能显著减少 MPC 每帧最近点搜索开销.
+        if len(path) > 3:
+            compact = path[::3]
+            if compact[-1] != path[-1]:
+                compact.append(path[-1])
+            self.current_path = compact
+        else:
+            self.current_path = path
         # 同步 costmap 给 MPC: O(1) 网格查表, 不遍历障碍物
         if self.unified_mpc is not None:
             self.unified_mpc.set_costmap(self.costmap)
-        if self.mode == "split" and self.speed_profiler and path:
-            self.v_limits = self.speed_profiler.compute_limits(path)
+        if self.mode == "split" and self.speed_profiler and self.current_path:
+            self.v_limits = self.speed_profiler.compute_limits(self.current_path)
 
     # ─── Split mode control loop ──────────────────────────────────
 
@@ -482,12 +489,8 @@ class ControlNode(Node):
         # 用机器人真实位置查障碍物距离, 0.5m 开始减速, 0.35m 触发倒车+重规划
         if self.world is not None:
             real_dist = self._min_obstacle_dist(self.robot.x, self.robot.y)
-            if real_dist < 0.5:
-                v_target = min(v_target, -0.3 + 1.3 * (real_dist / 0.5))
-            if real_dist < 0.35 and not self._backing_up:
-                self._backing_up = True
-                self._backup_steps = 25  # 倒车 0.5s @ 50Hz
-                self._needs_replan = True
+            if real_dist < 0.20:
+                v_target = min(v_target, max(0.05, real_dist / 0.20 * self.robot.max_v))
 
         # 纵向: 倒车时 PID 不接管, 直接设负速度; 正常时 PID 追 v_target
         if self._backing_up and self._backup_steps > 0:
@@ -505,16 +508,19 @@ class ControlNode(Node):
 
     def _control_unified(self):
         v_cmd, omega = self.unified_mpc.compute(self.robot, self.current_path)
+        real_dist = float('inf')
 
         # 安全备份: robot 当前位置离障碍物太近 → 倒车 + 通知 BT
         if self.world is not None:
             real_dist = self._min_obstacle_dist(self.robot.x, self.robot.y)
-            if real_dist < 0.5:  # 减速
-                v_cmd = min(v_cmd, -0.3 + 1.3 * (real_dist / 0.5))
-            if real_dist < 0.35 and not self._backing_up:  # 倒车
-                self._backing_up = True
-                self._backup_steps = 25  # 0.5s × 50Hz = 25步, 倒约 0.5m
-                self._needs_replan = True
+            if real_dist < 0.20:  # 减速
+                v_cmd = min(v_cmd, max(0.05, real_dist / 0.20 * self.robot.max_v))
+
+        if self.current_path:
+            goal = self.current_path[-1]
+            d_goal = math.sqrt((self.robot.x-goal[0])**2 + (self.robot.y-goal[1])**2)
+            if d_goal > 1.0 and real_dist > 0.30:
+                v_cmd = max(v_cmd, 0.45)
 
         if self._backing_up and self._backup_steps > 0:
             v_cmd = -0.5

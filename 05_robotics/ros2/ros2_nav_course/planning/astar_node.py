@@ -190,7 +190,8 @@ class AStarPlannerNode(Node):
     def __init__(self, world, hz: float = 10.0):
         super().__init__("astar_planner_node")
         self.world = world
-        self.planner = AStarPlanner(cost_threshold=200)  # 254=致命, 50=膨胀可过
+        # unknown=80 可探索; inflated=120 高代价可过; lethal=254 不可通行.
+        self.planner = AStarPlanner(cost_threshold=200)
         self.latest_costmap: Optional[OccupancyGrid] = None
         self.current_goal: Optional[Tuple[float, float]] = None
         self.current_pose: Tuple[float, float] = (0.0, 0.0)

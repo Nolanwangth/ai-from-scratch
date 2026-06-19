@@ -40,7 +40,6 @@ from ros2_nav_course.utils.mock_ros2 import (
     Node, OccupancyGrid, Pose, Path, log_info, log_ok, log_warn, log_error,
     Rate, explain_ros2_dataflow
 )
-from ros2_nav_course.utils.visualizer import NavigationVisualizer
 
 
 def print_separator(title: str):
@@ -170,15 +169,20 @@ def demo_run_navigation(control_mode="split", use_viz=False):
     # ── 可视化 (可选) ──
     viz = None
     if use_viz:
+        from ros2_nav_course.utils.visualizer import NavigationVisualizer
         viz = NavigationVisualizer(world)
         viz.goal = (goal_x, goal_y)
         log_ok("可视化窗口已打开")
 
-    # ── 初始地图 — 原地扫 5 帧建前方视野, 边走边继续建图 ──
+    # ── 初始地图 — 原地 360° 扫描一圈, 先把起点周围的障碍看清楚 ──
     from ros2_nav_course.utils.mock_ros2 import Odometry as OdomMsg
-    for _ in range(5):
+    scan_steps = int(2 * math.pi / (1.5 * 0.05)) + 1
+    robot.set_velocity(0.0, 1.5)
+    for _ in range(scan_steps):
+        robot.update(0.05)
         perception._sensor_callback()
         slam._tick()
+    robot.set_velocity(0.0, 0.0)
     costmap._inflate_and_publish()
     if controller.unified_mpc and controller.unified_mpc.cm_data is None:
         controller.unified_mpc.set_costmap(costmap.costmap)
@@ -186,11 +190,16 @@ def demo_run_navigation(control_mode="split", use_viz=False):
     if viz:
         viz.update_slam_map(slam._grid)
 
-    # ── 初算路径: planner 通过 /pose_corrected 获 SLAM 估计位姿 (不是 true robot pose) ──
+    # ── 初算路径: mock 不回溯历史消息, 初始化时手动给 planner pose+costmap ──
+    drx, dry, _ = slam._drifted_pose
+    planner.current_pose = (drx, dry)
+    planner.latest_costmap = costmap.costmap  # mock时序问题
     planner.set_goal(goal_x, goal_y)
     plan = planner.plan()
+    if plan:
+        controller.set_path(plan)  # mock时序: controller 订阅时 plan 还没发
     if plan and not use_viz:
-        log_ok(f"  初始路径: {len(plan)} 个航点 (A*) — 基于 SLAM 估计位姿")
+        log_ok(f"  初始路径: {len(plan)} 个航点 (A*) 起点=({drx:.1f},{dry:.1f})")
 
     # ── 主控制循环 (50Hz) ──
     max_steps = 2000
@@ -202,14 +211,14 @@ def demo_run_navigation(control_mode="split", use_viz=False):
         if step % 2 == 0:
             perception._sensor_callback()
 
-        # 动态障碍物: 第 400 步在路径前方掉落一个 BOX
-        if step == 400:
+        # 动态障碍物: 后半程再注入, 避免增量地图刚起步就被强行堵死
+        if step == 1200:
             from ros2_nav_course.simulation.world_2d import Obstacle
             idx = min(len(plan) * 2 // 3, len(plan) - 1) if plan else 0
             bx, by = plan[idx] if plan else (5.0, 5.0)
             if math.sqrt((bx-robot.x)**2 + (by-robot.y)**2) < 1.5:
                 bx, by = robot.x + 2.0, robot.y + 2.0
-            world.obstacles.append(Obstacle(bx, by, 1.0, 1.0, "BOX!"))
+            world.obstacles.append(Obstacle(bx, by, 0.6, 0.6, "BOX!"))
             slam._tick()
             costmap._inflate_and_publish()
             if viz:
@@ -234,8 +243,8 @@ def demo_run_navigation(control_mode="split", use_viz=False):
             else:
                 decision.context["recovery_count"] = 0
 
-            # planner 通过 /pose_corrected 获取 SLAM 估计位姿
-            new_plan = planner.plan(verbose=was_blocked)  # publishes /plan → controller._plan_cb
+            planner.current_pose = (slam._drifted_pose[0], slam._drifted_pose[1])
+            new_plan = planner.plan(verbose=was_blocked)  # 发布 /plan → controller._plan_cb
             if new_plan:
                 plan = new_plan
                 decision.context["path_blocked"] = False
