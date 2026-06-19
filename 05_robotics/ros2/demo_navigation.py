@@ -174,24 +174,21 @@ def demo_run_navigation(control_mode="split", use_viz=False):
         viz.goal = (goal_x, goal_y)
         log_ok("可视化窗口已打开")
 
-    # ── 初始地图 + costmap — Topic 链: /odom → /map → /costmap ──
-    # NOTE: 发布必须在所有 Node 订阅后做, 否则 mock 不回溯历史消息
+    # ── 初始地图 — 原地扫 5 帧建前方视野, 边走边继续建图 ──
     from ros2_nav_course.utils.mock_ros2 import Odometry as OdomMsg
     for _ in range(5):
-        x, y, t = robot.get_pose()
-        slam._odom_callback(OdomMsg(pose=Pose(x, y, t)))
-    slam._tick()   # 发布 /map → costmap._map_callback 触发
-    costmap._inflate_and_publish()  # 发布 /costmap → planner+controller 收到
-    # NOTE: mock_ros2 不回溯历史消息, 确保 MPC 拿到 costmap
+        perception._sensor_callback()
+        slam._tick()
+    costmap._inflate_and_publish()
     if controller.unified_mpc and controller.unified_mpc.cm_data is None:
         controller.unified_mpc.set_costmap(costmap.costmap)
 
-    # ── 初算路径 (planner 已有 costmap, 发布 /plan → controller 收到) ──
-    planner.set_pose(robot.x, robot.y)
+    # ── 初算路径: planner 通过 /pose_corrected 获 SLAM 估计位姿 (不是 true robot pose) ──
+    # NOTE: SLAM 已发布 /pose_corrected → planner._pose_callback 已设置 current_pose
     planner.set_goal(goal_x, goal_y)
-    plan = planner.plan()  # 发布 /plan → controller._plan_cb 自动设 current_path
+    plan = planner.plan()
     if plan and not use_viz:
-        log_ok(f"  初始路径: {len(plan)} 个航点 (A*)")
+        log_ok(f"  初始路径: {len(plan)} 个航点 (A*) — 基于 SLAM 估计位姿")
 
     # ── 主控制循环 (50Hz) ──
     max_steps = 2000
@@ -199,12 +196,9 @@ def demo_run_navigation(control_mode="split", use_viz=False):
     bt_triggered = False
 
     for step in range(max_steps):
+        # 感知: 发布 /odom on topic → SLAM 订阅
         if step % 2 == 0:
             perception._sensor_callback()
-
-        if step % 5 == 0:
-            x, y, t = robot.get_pose()
-            slam._odom_callback(OdomMsg(pose=Pose(x, y, t)))
 
         # 动态障碍物: 第 400 步在路径前方掉落一个 BOX
         if step == 400:
@@ -214,10 +208,8 @@ def demo_run_navigation(control_mode="split", use_viz=False):
             if math.sqrt((bx-robot.x)**2 + (by-robot.y)**2) < 1.5:
                 bx, by = robot.x + 2.0, robot.y + 2.0
             world.obstacles.append(Obstacle(bx, by, 1.0, 1.0, "BOX!"))
-            # 立刻重建 costmap 让 A* 看到新障碍物
             slam._tick()
             costmap._inflate_and_publish()
-            # costmap 发布 /costmap → planner+controller 通过订阅自动获取
             if viz:
                 viz.update_costmap(costmap.costmap)
                 viz.refresh_obstacles()
@@ -225,6 +217,7 @@ def demo_run_navigation(control_mode="split", use_viz=False):
             plan = None
             decision.context["path_blocked"] = True
 
+        # SLAM 建图 + Costmap 更新
         if step % 20 == 0:
             slam._tick()
             costmap._inflate_and_publish()
@@ -239,7 +232,7 @@ def demo_run_navigation(control_mode="split", use_viz=False):
             else:
                 decision.context["recovery_count"] = 0
 
-            planner.set_pose(robot.x, robot.y)
+            # planner 通过 /pose_corrected 获取 SLAM 估计位姿
             new_plan = planner.plan(verbose=was_blocked)  # publishes /plan → controller._plan_cb
             if new_plan:
                 plan = new_plan

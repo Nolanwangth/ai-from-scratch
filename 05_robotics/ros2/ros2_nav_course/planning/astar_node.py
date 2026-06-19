@@ -197,17 +197,20 @@ class AStarPlannerNode(Node):
         self.latest_path: Optional[List[Tuple[float, float]]] = None
 
         self.create_subscription("/costmap", self._costmap_callback, "OccupancyGrid")
+        # SLAM 估计位姿 (带漂移), 不是真实位姿 — 这才是真 SLAM 的语义
+        self.create_subscription("/pose_corrected", self._pose_callback, "Pose")
         self.create_publisher("/plan", "Path")
         log_ok(f"[planner] A* planner ready")
 
     def _costmap_callback(self, cm: OccupancyGrid):
         self.latest_costmap = cm
 
+    def _pose_callback(self, pose):
+        """订阅 SLAM 的 /pose_corrected — 用估计位姿规划, 不是真值."""
+        self.current_pose = (pose.x, pose.y)
+
     def set_goal(self, x: float, y: float):
         self.current_goal = (x, y)
-
-    def set_pose(self, x: float, y: float):
-        self.current_pose = (x, y)
 
     def plan(self, verbose: bool = True) -> Optional[List[Tuple[float, float]]]:
         """算路径"""

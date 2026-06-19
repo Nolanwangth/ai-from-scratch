@@ -85,19 +85,20 @@ class CostmapNode(Node):
         dilated = ndimage.maximum_filter(raw.astype(np.float32),
                                          footprint=kernel)
 
-        # 0=自由, 50=膨胀区(可通过但加惩罚), 254=致命(不可通过)
-        costmap = np.zeros_like(dilated)
-        costmap[dilated <= 0] = 0        # 自由空间
-        costmap[(dilated > 0) & (dilated < 50)] = 50  # 膨胀区, A* 可过但会避开
-        costmap[(dilated >= 50) & (dilated < 100)] = 50 # 膨胀区边缘
-        costmap[dilated >= 100] = 254     # 致命区
+        # costmap: 0=自由, 80=未知(可过但代价高), 50=膨胀区, 254=致命
+        # 未知区域代价高让 A* 尽量走已知区域, 但不完全阻断探索
+        costmap = np.full_like(dilated, 80, dtype=np.int16)   # 默认=未知=高代价可过
+        costmap[dilated == 0] = 0           # 自由空间
+        costmap[(dilated > 0) & (dilated < 100)] = 50   # 膨胀区
+        costmap[dilated >= 100] = 254        # 致命区 (障碍物)
+        costmap_out = costmap
 
         self.costmap = OccupancyGrid(
             width=W, height=H,
             resolution=self.latest_map.resolution,
             origin_x=self.latest_map.origin_x,
             origin_y=self.latest_map.origin_y,
-            data=list(costmap.flatten().astype(int))
+            data=list(costmap_out.flatten().astype(int))
         )
         self.publish("/costmap", self.costmap)
 

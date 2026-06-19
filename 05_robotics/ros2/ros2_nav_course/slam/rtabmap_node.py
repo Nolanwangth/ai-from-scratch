@@ -78,7 +78,7 @@ class RTABMapNode(Node):
                  stm_size: int = 10, wm_size: int = 50,
                  keyframe_min_dist: float = 0.5,
                  loop_threshold: float = 0.6,
-                 hz: float = 30.0):
+                 hz: float = 30.0, resolution: float = 0.05):
         super().__init__("rtabmap_slam_node")
         self.world = world
         self.robot = robot
@@ -96,10 +96,33 @@ class RTABMapNode(Node):
         self.loop_threshold = loop_threshold
         self.last_kf_pos: Optional[Tuple[float, float]] = None
 
-        # ── 统计 ──
+        # ── 统计 + 位姿估计 ──
         self.n_keyframes = 0
         self.n_loops = 0
-        self.corrected_pose = (0.0, 0.0, 0.0)
+        self._true_pose = (0.0, 0.0, 0.0)       # 真实位姿 (上帝视角)
+        self._drifted_pose = (0.0, 0.0, 0.0)     # SLAM 估计位姿 (带漂移)
+        self._drift_x = 0.0                       # 累积漂移量
+        self._drift_y = 0.0
+        self._drift_theta = 0.0
+        self._last_true_pose = (0.0, 0.0, 0.0)
+        # 漂移参数: 每米平移漂移 3%, 每弧度旋转漂移 5%
+        self._drift_trans_ratio = 0.03
+        self._drift_rot_ratio = 0.05
+
+        # ── 增量建图 — 地图随视野逐步 reveal, 不是一次性真值 ──
+        self.resolution = resolution
+        self.map_W = int(self.world.width / resolution) + 1
+        self.map_H = int(self.world.height / resolution) + 1
+        self.map_ox = 0.0
+        self.map_oy = 0.0
+        # 占据栅格: -1=未知, 0=自由, 100=占据
+        self._grid = np.full((self.map_H, self.map_W), -1, dtype=np.int8)
+        # D435 模拟参数
+        self.d435_fov_deg = 87.0        # D435 水平视场角
+        self.d435_max_range = 5.0       # 最大有效深度 (m)
+        self.d435_rays = 120            # 每帧射线数
+        self._depth_noise_std = 0.03    # 深度噪声标准差 (m)
+        self._obs_noise_prob = 0.02     # 2% 概率把自由格子误报为占据
 
         # ── 发布者 ──
         self.create_publisher("/map", "OccupancyGrid")
@@ -114,33 +137,62 @@ class RTABMapNode(Node):
         self._latest_grid = None
         self.create_service("/get_map", self._get_map_handler)
 
-        log_ok(f"[SLAM] RTAB-Map ready (STM={stm_size}, WM={wm_size})")
+        log_ok(f"[SLAM] RTAB-Map ready (STM={stm_size}, WM={wm_size}, "
+               f"incremental map {self.map_W}x{self.map_H})")
 
     def _get_map_handler(self, _request):
         """Service handler: 返回最新的占据栅格."""
         return dict(grid=self._latest_grid) if self._latest_grid else dict(error="no map yet")
 
     def _odom_callback(self, odom: Odometry):
-        """收到里程计数据 → 处理一帧"""
+        """收到里程计数据 → 累积漂移 + 关键帧 + 回环检测."""
         x, y, theta = odom.pose.x, odom.pose.y, odom.pose.theta
 
-        # Step 1: 关键帧判定
-        if self._is_keyframe(x, y):
-            kf = KeyFrame(self.next_id, x, y, theta)
+        # 第一帧 odom: 初始化, 不累积漂移
+        if self._last_true_pose == (0.0, 0.0, 0.0):
+            self._last_true_pose = (x, y, theta)
+            self._true_pose = (x, y, theta)
+            self._drifted_pose = (x, y, theta)
+            return
+
+        self._true_pose = (x, y, theta)
+        lx, ly, lt = self._last_true_pose
+
+        # 累积 odom 漂移: 误差随运动量增长
+        dx = x - lx
+        dy = y - ly
+        dtheta = theta - lt
+        dist = math.sqrt(dx**2 + dy**2)
+        self._drift_x += dist * self._drift_trans_ratio * (1.0 if random.random() > 0.5 else -1.0)
+        self._drift_y += dist * self._drift_trans_ratio * (1.0 if random.random() > 0.5 else -1.0)
+        if abs(dtheta) > 0.01:
+            self._drift_theta += abs(dtheta) * self._drift_rot_ratio * (1.0 if random.random() > 0.5 else -1.0)
+
+        # SLAM 估计位姿 = 真值 + 累积漂移 (漂移量累加, 不是每帧独立噪声)
+        dx_drifted = odom.pose.x + self._drift_x
+        dy_drifted = odom.pose.y + self._drift_y
+        dt_drifted = odom.pose.theta + self._drift_theta
+        self._drifted_pose = (dx_drifted, dy_drifted, dt_drifted)
+        self._last_true_pose = self._true_pose
+
+        # Step 1: 关键帧判定 (基于漂移后的估计位置)
+        if self._is_keyframe(dx_drifted, dy_drifted):
+            kf = KeyFrame(self.next_id, dx_drifted, dy_drifted, dt_drifted)
+            # 存储真值和漂移位置用于回环修正
+            kf._true_pose = self._true_pose
+            kf._drifted_pose = self._drifted_pose
             self.next_id += 1
             self.n_keyframes += 1
 
             # Step 2: 加入 STM
             self.stm.append(kf)
-            self.last_kf_pos = (x, y)
+            self.last_kf_pos = (dx_drifted, dy_drifted)
 
             # Step 3: STM→WM 转移
             self._manage_memory()
 
             # Step 4: 回环检测
             self._detect_loop(kf)
-
-        self.corrected_pose = (x, y, theta)
 
     def _is_keyframe(self, x: float, y: float) -> bool:
         """判断是否创建关键帧"""
@@ -162,7 +214,7 @@ class RTABMapNode(Node):
             self.ltm[min_id] = self.wm.pop(min_id)
 
     def _detect_loop(self, new_kf: KeyFrame):
-        """回环检测: 只在 WM 里搜!"""
+        """回环检测: 只在 WM 里搜. 命中则修正 drift (模拟图优化)"""
         best_sim = 0
         best_kf = None
         for kf in self.wm.values():
@@ -177,24 +229,78 @@ class RTABMapNode(Node):
             self.n_loops += 1
             if best_kf.id in self.ltm:
                 self.wm[best_kf.id] = self.ltm.pop(best_kf.id)
+
+            # 模拟图优化: 修正 drifts
+            # 回环匹配的旧关键帧记录了自己的真值位置, 用这个来纠正累积误差
+            if hasattr(best_kf, '_true_pose'):
+                tx, ty, tt = best_kf._true_pose
+                correction_x = tx - new_kf._drifted_pose[0] if hasattr(new_kf, '_drifted_pose') else 0
+                correction_y = ty - new_kf._drifted_pose[1] if hasattr(new_kf, '_drifted_pose') else 0
+                correction_t = tt - new_kf._drifted_pose[2] if hasattr(new_kf, '_drifted_pose') else 0
+                self._drift_x += correction_x * 0.7  # 70% 修正, 不完全拉回
+                self._drift_y += correction_y * 0.7
+                self._drift_theta += correction_t * 0.7
+
             self.publish("/loop_detected",
-                         f"回环! {new_kf.id} ↔ {best_kf.id} (sim={best_sim:.2f})")
-            # 模拟图优化: 修正当前位置 (真实的交给 g2o)
-            new_kf.weight *= 1.2  # 回环帧多重要 → 更难被踢
+                         f"回环! {new_kf.id}↔{best_kf.id} (sim={best_sim:.2f})")
+            new_kf.weight *= 1.2
 
     def _tick(self):
-        """定时发布地图"""
-        grid, ox, oy = self.world.to_occupancy_grid(resolution=0.05)
+        """定时发布地图 — 增量建图 + 漂移位姿广播."""
+        # 用 SLAM 估计位姿 (带漂移) 而不是真实位姿建图
+        rx, ry, rtheta = self._drifted_pose
+
+        # 模拟 D435 深度扫描: 从估计位置射出射线
+        # 射线命中障碍物 → 到达前标记自由(0), 命中点标记占据(100)
+        # 射线未命中 → 到达 max_range 全标记自由(0)
+        angles = np.linspace(-self.d435_fov_deg/2, self.d435_fov_deg/2, self.d435_rays)
+        for a_deg in angles:
+            a_rad = rtheta + math.radians(a_deg)
+            dx = math.cos(a_rad)
+            dy = math.sin(a_rad)
+            # 射线步进 (每 resolution 一步)
+            step = self.resolution
+            hit_dist = self.d435_max_range  # 默认没命中
+            hit = False
+            for s in np.arange(step, self.d435_max_range + step, step):
+                wx = rx + s * dx
+                wy = ry + s * dy
+                gx = int((wx - self.map_ox) / self.resolution)
+                gy = int((wy - self.map_oy) / self.resolution)
+                if not (0 <= gx < self.map_W and 0 <= gy < self.map_H):
+                    break
+                # 用世界真值判断这个点是不是障碍物 (模拟 D435 测到了东西)
+                if self.world.is_collision(wx, wy, 0.05):
+                    hit_dist = s + random.gauss(0, self._depth_noise_std)
+                    hit = True
+                    break
+            # 标记射线经过的格子
+            hit_gx = int((rx + hit_dist * dx - self.map_ox) / self.resolution)
+            hit_gy = int((ry + hit_dist * dy - self.map_oy) / self.resolution)
+            for s in np.arange(step, hit_dist, step):
+                wx = rx + s * dx
+                wy = ry + s * dy
+                gx = int((wx - self.map_ox) / self.resolution)
+                gy = int((wy - self.map_oy) / self.resolution)
+                if 0 <= gx < self.map_W and 0 <= gy < self.map_H:
+                    # 之前未知 → 标记自由; 已标过的保持
+                    if self._grid[gy, gx] == -1:
+                        self._grid[gy, gx] = 0  # 自由空间
+            # 命中点: 标记占据 (带小概率误报)
+            if hit and 0 <= hit_gx < self.map_W and 0 <= hit_gy < self.map_H:
+                self._grid[hit_gy, hit_gx] = 0 if random.random() < self._obs_noise_prob else 100
+
+        # 发布当前部分地图
         og = OccupancyGrid(
-            width=grid.shape[1], height=grid.shape[0],
-            resolution=0.05, origin_x=ox, origin_y=oy,
-            data=list(grid.flatten())
+            width=self.map_W, height=self.map_H,
+            resolution=self.resolution,
+            origin_x=self.map_ox, origin_y=self.map_oy,
+            data=list(self._grid.flatten())
         )
-        self._latest_grid = og  # 缓存, /get_map service 用
+        self._latest_grid = og
         self.publish("/map", og)
 
-        px, py, pt = self.corrected_pose
-        self.publish("/pose_corrected", Pose(px, py, pt))
+        self.publish("/pose_corrected", Pose(rx, ry, rtheta))
 
     def memory_summary(self) -> str:
         return (f"STM={len(self.stm)} | WM={len(self.wm)} | "
