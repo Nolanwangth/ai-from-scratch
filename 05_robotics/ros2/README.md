@@ -11,10 +11,7 @@
 ## 快速开始
 
 ```bash
-# 一次性环境搭建
-conda create -n ros2_nav python=3.10 numpy matplotlib scipy -y
-
-# 激活环境
+# 激活你的 ros2_nav 环境
 conda activate ros2_nav
 cd ai-from-scratch/05_robotics/ros2
 ```
